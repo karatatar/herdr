@@ -114,7 +114,10 @@ pub(super) fn read_terminal_snapshot(
 ) -> crate::pane::TerminalReadSnapshot {
     use crate::api::schema::{ReadFormat, ReadSource};
 
-    let line_limit = lines.map(|lines| lines.min(1000) as usize);
+    // Fork: no hard cap on requested lines — callers may request the full
+    // scrollback. The effective amount is still bounded by the pane's scrollback
+    // buffer (see `scrollback_limit_bytes`), so this cannot grow without limit.
+    let line_limit = lines.map(|lines| lines as usize);
     let recent_lines = line_limit.unwrap_or(80);
     match (format, source) {
         (ReadFormat::Text, ReadSource::Visible) => {
