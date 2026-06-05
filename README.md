@@ -25,7 +25,20 @@ workspaces, tabs, panes. mouse-native: click, drag, split. every agent at a glan
 curl -fsSL https://herdr.dev/install.sh | sh
 ```
 
-or install with homebrew:
+### fork build (this fork)
+
+this fork ships prebuilt binaries from GitHub Actions. install the latest fork
+release with:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/karatatar/herdr/master/install.sh | bash
+```
+
+the binaries are produced by the `Fork Release (binaries)` workflow and attached
+to a GitHub Release marked as latest. this fork also removes the 1000-line hard
+cap on `pane read --format ansi`, so callers can read the full scrollback.
+
+or install upstream with homebrew:
 
 ```bash
 brew install herdr

@@ -140,7 +140,10 @@ impl App {
         else {
             return pane_not_found(id, &params.pane_id);
         };
-        let requested_lines = params.lines.unwrap_or(80).min(1000) as usize;
+        // No hard cap on requested lines: callers may request the full scrollback.
+        // The effective amount is still bounded by the pane's scrollback buffer
+        // (see `scrollback_limit_bytes`), so this cannot grow without limit.
+        let requested_lines = params.lines.unwrap_or(80) as usize;
         let text = match params.format {
             ReadFormat::Text => match params.source {
                 ReadSource::Visible => pane.visible_text(),
