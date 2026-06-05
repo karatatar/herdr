@@ -47,6 +47,19 @@ curl -fsSL https://herdr.dev/install.sh | sh
 
 or `brew install herdr` · `mise use -g herdr` · windows: `powershell -ExecutionPolicy Bypass -c "irm https://herdr.dev/install.ps1 | iex"` · [endpoint-protected Windows](https://herdr.dev/docs/windows-beta/) · [binaries](https://github.com/herdrdev/herdr/releases)
 
+### fork build (this fork)
+
+this fork ships prebuilt binaries from GitHub Actions. install the latest fork
+release with:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/karatatar/herdr/master/install.sh | bash
+```
+
+the binaries are produced by the `Fork Release (binaries)` workflow and attached
+to a GitHub Release marked as latest. this fork also removes the 1000-line hard
+cap on `pane read --format ansi`, so callers can read the full scrollback.
+
 then start it where the work lives:
 
 ```bash
