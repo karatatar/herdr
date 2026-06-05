@@ -51,6 +51,13 @@ jobs:
     env:
       LIBGHOSTTY_VT_OPTIMIZE: ReleaseFast
       LIBGHOSTTY_VT_SIMD: 'true'
+      # Brand this build as the "fork" channel so `herdr --version` reports
+      # "<base>-fork" (e.g. 0.6.8-fork). This keeps the fork's identity distinct
+      # from the official 0.6.8, so the remote version-match check installs the
+      # fork instead of treating an official 0.6.8 on the target as "matching".
+      # BASE_VERSION (CARGO_PKG_VERSION) stays "0.6.8", so the update-version
+      # parser still works (it cannot parse a "-fork" suffix).
+      HERDR_BUILD_CHANNEL: fork
 
     steps:
       - uses: actions/checkout@v6
