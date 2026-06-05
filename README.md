@@ -38,6 +38,24 @@ the binaries are produced by the `Fork Release (binaries)` workflow and attached
 to a GitHub Release marked as latest. this fork also removes the 1000-line hard
 cap on `pane read --format ansi`, so callers can read the full scrollback.
 
+fork builds report their version as `<base>-fork` (e.g. `0.6.8-fork`) via the
+`HERDR_BUILD_CHANNEL=fork` build channel, so the remote version-match check
+never mistakes an official build on a target for a matching one.
+
+**remote (`herdr --remote <target>`):** the cap removal applies on the side that
+runs the panes (the remote server), so the fork must be installed there.
+
+- same OS+arch as your local machine: herdr offers to seed your local fork
+  binary onto the target — answer `Y`.
+- different OS/arch: point herdr at the matching fork asset explicitly, e.g.
+
+  ```bash
+  curl -fsSL -o /tmp/herdr-fork \
+    https://github.com/karatatar/herdr/releases/latest/download/herdr-linux-aarch64
+  chmod +x /tmp/herdr-fork
+  HERDR_REMOTE_BINARY=/tmp/herdr-fork herdr --remote <target>
+  ```
+
 or install upstream with homebrew:
 
 ```bash
