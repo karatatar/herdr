@@ -103,13 +103,13 @@ fn parse_integration_target(
 ) -> std::io::Result<Option<IntegrationTarget>> {
     let Some(target) = args.first().map(|arg| arg.as_str()) else {
         eprintln!(
-            "usage: herdr integration {action} <pi|omp|claude|codex|copilot|droid|kimi|opencode|hermes|qodercli>"
+            "usage: herdr integration {action} <pi|omp|claude|codex|copilot|droid|kimi|opencode|kilo|hermes|qodercli|cursor>"
         );
         return Ok(None);
     };
     if args.len() != 1 {
         eprintln!(
-            "usage: herdr integration {action} <pi|omp|claude|codex|copilot|droid|kimi|opencode|hermes|qodercli>"
+            "usage: herdr integration {action} <pi|omp|claude|codex|copilot|droid|kimi|opencode|kilo|hermes|qodercli|cursor>"
         );
         return Ok(None);
     }
@@ -123,12 +123,14 @@ fn parse_integration_target(
         "droid" => IntegrationTarget::Droid,
         "kimi" => IntegrationTarget::Kimi,
         "opencode" => IntegrationTarget::Opencode,
+        "kilo" => IntegrationTarget::Kilo,
         "hermes" => IntegrationTarget::Hermes,
         "qodercli" => IntegrationTarget::Qodercli,
+        "cursor" => IntegrationTarget::Cursor,
         _ => {
             eprintln!("unknown integration target: {target}");
             eprintln!(
-                "currently supported: pi, omp, claude, codex, copilot, droid, kimi, opencode, hermes, qodercli"
+                "currently supported: pi, omp, claude, codex, copilot, droid, kimi, opencode, kilo, hermes, qodercli, cursor"
             );
             return Ok(None);
         }
@@ -147,8 +149,10 @@ fn print_integration_help() {
     eprintln!("  herdr integration install droid");
     eprintln!("  herdr integration install kimi");
     eprintln!("  herdr integration install opencode");
+    eprintln!("  herdr integration install kilo");
     eprintln!("  herdr integration install hermes");
     eprintln!("  herdr integration install qodercli");
+    eprintln!("  herdr integration install cursor");
     eprintln!("  herdr integration uninstall pi");
     eprintln!("  herdr integration uninstall omp");
     eprintln!("  herdr integration uninstall claude");
@@ -157,7 +161,9 @@ fn print_integration_help() {
     eprintln!("  herdr integration uninstall droid");
     eprintln!("  herdr integration uninstall kimi");
     eprintln!("  herdr integration uninstall opencode");
+    eprintln!("  herdr integration uninstall kilo");
     eprintln!("  herdr integration uninstall hermes");
     eprintln!("  herdr integration uninstall qodercli");
+    eprintln!("  herdr integration uninstall cursor");
     eprintln!("  herdr integration status [--outdated-only]");
 }

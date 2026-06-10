@@ -22,6 +22,7 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
     matches!(
         &request.method,
         Method::ServerReloadConfig(_)
+            | Method::NotificationShow(_)
             | Method::WorkspaceCreate(_)
             | Method::WorkspaceFocus(_)
             | Method::WorkspaceRename(_)
@@ -37,6 +38,10 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::AgentFocus(_)
             | Method::AgentStart(_)
             | Method::PaneSplit(_)
+            | Method::PaneSwap(_)
+            | Method::PaneZoom(_)
+            | Method::PaneFocusDirection(_)
+            | Method::PaneResize(_)
             | Method::PaneRename(_)
             | Method::PaneReportAgent(_)
             | Method::PaneReportAgentSession(_)

@@ -201,6 +201,7 @@ impl TerminalRuntime {
         self.0.resize(rows, cols, cell_width_px, cell_height_px);
     }
 
+    #[cfg(unix)]
     pub fn nudge_child_redraw_after_handoff(&self) {
         self.0.nudge_child_redraw_after_handoff();
     }
@@ -235,6 +236,10 @@ impl TerminalRuntime {
         show_cursor: bool,
     ) -> Option<crate::pane::TerminalCursorState> {
         self.0.cursor_state(area, show_cursor)
+    }
+
+    pub fn synchronized_output_active(&self) -> bool {
+        self.0.synchronized_output_active()
     }
 
     pub fn visible_text(&self) -> String {

@@ -129,6 +129,9 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             name: herdr-macos-aarch64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            name: herdr-windows-x86_64.exe
     runs-on: ${{ matrix.os }}
     env:
       LIBGHOSTTY_VT_OPTIMIZE: ReleaseFast
@@ -178,12 +181,22 @@ jobs:
           key: preview-${{ matrix.target }}
 
       - name: Remove Zig caches
+        if: runner.os != 'Windows'
         run: rm -rf .zig-cache vendor/libghostty-vt/.zig-cache vendor/libghostty-vt/zig-out
+
+      - name: Remove Zig caches
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force .zig-cache -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force vendor/libghostty-vt/.zig-cache -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force vendor/libghostty-vt/zig-out -ErrorAction SilentlyContinue
 
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package artifact
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -212,6 +225,18 @@ jobs:
             echo "channel=preview"
           } >> BUILD_INFO.txt
 
+      - name: Package artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Copy-Item target\${{ matrix.target }}\release\herdr.exe ${{ matrix.name }}
+          $hash = (Get-FileHash -Algorithm SHA256 ${{ matrix.name }}).Hash.ToLowerInvariant()
+          "$hash  ${{ matrix.name }}" | Out-File -Encoding ascii ${{ matrix.name }}.sha256
+          "commit=${{ needs.preflight.outputs.commit }}" | Out-File -Encoding utf8 BUILD_INFO.txt
+          "build_id=${{ needs.preflight.outputs.build_id }}" | Out-File -Encoding utf8 -Append BUILD_INFO.txt
+          "target=${{ matrix.target }}" | Out-File -Encoding utf8 -Append BUILD_INFO.txt
+          "channel=preview" | Out-File -Encoding utf8 -Append BUILD_INFO.txt
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
@@ -227,6 +252,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      issues: write
     steps:
       - uses: actions/checkout@v6
         with:
@@ -238,6 +264,17 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: artifacts
+
+      - name: Record previous preview commit
+        id: previous-preview
+        shell: bash
+        run: |
+          set -euo pipefail
+          previous="$(python3 scripts/preview.py current-commit --manifest website/preview.json || true)"
+          if [ -z "$previous" ]; then
+            previous="$(git describe --tags --match 'v[0-9]*' --abbrev=0)"
+          fi
+          echo "commit=$previous" >> "$GITHUB_OUTPUT"
 
       - name: Generate notes and checksums
         shell: bash
@@ -253,7 +290,7 @@ jobs:
           result = {}
           for path in pathlib.Path('artifacts').glob('herdr-*/*.sha256'):
               digest, name = path.read_text().split()[:2]
-              target = name.removeprefix('herdr-')
+              target = name.removeprefix('herdr-').removesuffix('.exe')
               result[target] = digest
           pathlib.Path('preview-sha256.json').write_text(json.dumps(result, indent=2) + '\n')
           PY
@@ -273,6 +310,7 @@ jobs:
             artifacts/herdr-linux-aarch64/herdr-linux-aarch64
             artifacts/herdr-macos-x86_64/herdr-macos-x86_64
             artifacts/herdr-macos-aarch64/herdr-macos-aarch64
+            artifacts/herdr-windows-x86_64.exe/herdr-windows-x86_64.exe
 
       - name: Update preview manifest
         run: |
@@ -297,6 +335,94 @@ jobs:
           git add website/preview.json
           git diff --cached --quiet || git commit -m "docs: update preview manifest"
           git push "https://x-access-token:${KANGAL_GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:master
+
+      - name: Mark preview-released issues
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.KANGAL_GITHUB_TOKEN }}
+          PREVIEW_RELEASED_LABEL: preview-released
+        run: |
+          set -euo pipefail
+
+          echo "Using GitHub token for $(gh api user --jq .login)."
+
+          PREVIEW_COMMIT='${{ needs.preflight.outputs.commit }}'
+          PREVIEW_TAG='${{ needs.preflight.outputs.tag }}'
+          PREVIEW_BUILD_ID='${{ needs.preflight.outputs.build_id }}'
+          PREVIOUS_PREVIEW_COMMIT='${{ steps.previous-preview.outputs.commit }}'
+
+          echo "Scanning preview commits in $PREVIOUS_PREVIEW_COMMIT..$PREVIEW_COMMIT for refs #<issue> mentions."
+          mapfile -t ISSUES < <(
+            git log --format='%s%n%b' "$PREVIOUS_PREVIEW_COMMIT..$PREVIEW_COMMIT" \
+              | perl -ne 'print "$1\n" if /\brefs\s+#([0-9]+)\b/i' \
+              | sort -nu
+          )
+
+          if [ "${#ISSUES[@]}" -eq 0 ]; then
+            echo "No preview issue refs found."
+            exit 0
+          fi
+
+          if ! gh api "repos/${GITHUB_REPOSITORY}/labels/${PREVIEW_RELEASED_LABEL}" >/dev/null 2>&1; then
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/labels" \
+              -f name="$PREVIEW_RELEASED_LABEL" \
+              -f color="1D76DB" \
+              -f description="Available on the preview channel, pending a stable release." \
+              >/dev/null \
+              || gh api "repos/${GITHUB_REPOSITORY}/labels/${PREVIEW_RELEASED_LABEL}" >/dev/null
+          fi
+
+          PREVIEW_URL="https://github.com/${GITHUB_REPOSITORY}/releases/tag/${PREVIEW_TAG}"
+          PREVIEW_COMMENT_MARKER="<!-- herdr:preview-released:${PREVIEW_TAG} -->"
+          PREVIEW_COMMENT="${PREVIEW_COMMENT_MARKER}"$'\n'"Released on the preview channel in [${PREVIEW_BUILD_ID}](${PREVIEW_URL}). This is available to preview users, but is not in a stable Herdr release yet."
+
+          issue_has_comment_marker() {
+            local issue="$1"
+            local marker="$2"
+            local comments
+            if ! comments="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${issue}/comments?per_page=100" --jq '.[].body')"; then
+              echo "::warning::Could not read comments for issue #$issue."
+              return 2
+            fi
+            grep -F -- "$marker" >/dev/null <<<"$comments"
+          }
+
+          for issue in "${ISSUES[@]}"; do
+            echo "Checking #$issue"
+            if ! data="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${issue}")"; then
+              echo "::warning::Could not read issue #$issue; skipping."
+              continue
+            fi
+
+            if jq -e 'has("pull_request")' <<<"$data" >/dev/null; then
+              echo "Skipping #$issue because it is a pull request."
+              continue
+            fi
+
+            HAS_PREVIEW_LABEL="$(jq -r --arg label "$PREVIEW_RELEASED_LABEL" 'any(.labels[].name; . == $label)' <<<"$data")"
+            if [ "$HAS_PREVIEW_LABEL" != "true" ]; then
+              if ! gh issue edit "$issue" --repo "$GITHUB_REPOSITORY" --add-label "$PREVIEW_RELEASED_LABEL"; then
+                echo "::warning::Could not label issue #$issue."
+                continue
+              fi
+            fi
+
+            MARKER_STATUS=0
+            issue_has_comment_marker "$issue" "$PREVIEW_COMMENT_MARKER" || MARKER_STATUS="$?"
+            if [ "$MARKER_STATUS" -eq 2 ]; then
+              continue
+            fi
+            if [ "$MARKER_STATUS" -eq 0 ]; then
+              echo "Skipping preview release comment for #$issue because it already exists."
+              continue
+            fi
+
+            if ! gh issue comment "$issue" --repo "$GITHUB_REPOSITORY" --body "$PREVIEW_COMMENT"; then
+              echo "::warning::Could not comment on issue #$issue."
+              continue
+            fi
+          done
 
       - name: Prune old preview prereleases
         env:

@@ -10,6 +10,7 @@ use crate::api::schema::{
 
 mod agent;
 mod integration;
+mod notification;
 mod pane;
 mod server;
 mod status;
@@ -40,6 +41,7 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "workspace" => workspace::run_workspace_command(&args[2..])?,
         "worktree" => worktree::run_worktree_command(&args[2..])?,
         "tab" => tab::run_tab_command(&args[2..])?,
+        "notification" => notification::run_notification_command(&args[2..])?,
         "agent" => agent::run_agent_command(&args[2..])?,
         "terminal" => run_terminal_command(&args[2..])?,
         "pane" => pane::run_pane_command(&args[2..])?,
@@ -77,7 +79,7 @@ fn channel_set(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     };
 
-    if let Some(reason) = channel_set_preview_rejection(
+    if let Some(reason) = channel_set_rejection(
         channel,
         crate::update::preview_channel_rejection_for_current_install(),
     ) {
@@ -149,13 +151,21 @@ fn parse_channel_set_arg(args: &[String]) -> Option<&str> {
     }
 }
 
-fn channel_set_preview_rejection(
+fn channel_set_rejection(
     channel: &str,
     install_rejection: Option<&'static str>,
 ) -> Option<&'static str> {
-    (channel == "preview")
-        .then_some(install_rejection)
-        .flatten()
+    if cfg!(windows) && channel == "stable" {
+        return Some(
+            "stable channel is not available on Windows yet; Windows builds are preview-only",
+        );
+    }
+
+    if channel == "preview" {
+        return install_rejection;
+    }
+
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -896,14 +906,34 @@ mod tests {
     #[test]
     fn channel_set_rejects_package_managed_preview_before_config_write() {
         assert_eq!(
-            super::channel_set_preview_rejection("preview", Some("no preview")),
+            super::channel_set_rejection("preview", Some("no preview")),
             Some("no preview")
         );
         assert_eq!(
-            super::channel_set_preview_rejection("stable", Some("no preview")),
-            None
+            super::channel_set_rejection("stable", Some("no preview")),
+            if cfg!(windows) {
+                Some(
+                    "stable channel is not available on Windows yet; Windows builds are preview-only",
+                )
+            } else {
+                None
+            }
         );
-        assert_eq!(super::channel_set_preview_rejection("preview", None), None);
+        assert_eq!(super::channel_set_rejection("preview", None), None);
+    }
+
+    #[test]
+    fn channel_set_rejects_stable_only_on_windows() {
+        assert_eq!(
+            super::channel_set_rejection("stable", None),
+            if cfg!(windows) {
+                Some(
+                    "stable channel is not available on Windows yet; Windows builds are preview-only",
+                )
+            } else {
+                None
+            }
+        );
     }
 
     #[test]

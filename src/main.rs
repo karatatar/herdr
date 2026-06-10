@@ -2,9 +2,10 @@ use std::io;
 
 use crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-    EnableFocusChange, EnableMouseCapture, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    EnableFocusChange, EnableMouseCapture,
 };
+#[cfg(not(windows))]
+use crossterm::event::{PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
 use crossterm::execute;
 
 pub(crate) const HERDR_ENV_VAR: &str = "HERDR_ENV";
@@ -18,10 +19,35 @@ const NESTED_HERDR_MESSAGES: [&str; 6] = [
     "recursion detected. base case not found. aborting.",
 ];
 
+#[cfg(not(windows))]
+fn push_keyboard_enhancement_flags() -> io::Result<()> {
+    execute!(
+        io::stdout(),
+        PushKeyboardEnhancementFlags(crate::input::ime_compatible_keyboard_enhancement_flags())
+    )
+}
+
+#[cfg(windows)]
+fn push_keyboard_enhancement_flags() -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn pop_keyboard_enhancement_flags() -> io::Result<()> {
+    execute!(io::stdout(), PopKeyboardEnhancementFlags)
+}
+
+#[cfg(windows)]
+fn pop_keyboard_enhancement_flags() -> io::Result<()> {
+    Ok(())
+}
+
+mod agent_detection_policy;
 mod agent_resume;
 mod api;
 mod app;
 mod build_info;
+#[cfg(not(windows))]
 mod checksum;
 mod cli;
 mod client;
@@ -233,10 +259,18 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Background notification popup delivery
 [ui.toast]
 # off = disable pop-up notifications
-# herdr = show top-right in-app toasts
+# herdr = show in-app toasts
 # terminal = ask the outer terminal to show a desktop notification
 # system = ask the OS notification service directly
 # delivery = "off"
+# delay_seconds = 1
+
+[ui.toast.herdr]
+# position = "bottom-right"
+
+[ui.toast.clipboard]
+# enabled = true
+# position = "bottom-center"
 
 # Play sounds when agents change state in background workspaces
 [ui.sound]
@@ -424,6 +458,7 @@ fn main() -> io::Result<()> {
         println!("       herdr workspace <subcommand> ...");
         println!("       herdr worktree <subcommand> ...");
         println!("       herdr tab <subcommand> ...");
+        println!("       herdr notification <subcommand> ...");
         println!("       herdr agent <subcommand> ...");
         println!("       herdr pane <subcommand> ...");
         println!("       herdr wait <subcommand> ...");
@@ -467,6 +502,10 @@ fn main() -> io::Result<()> {
                 "Git worktree helpers over the socket API",
             ),
             ("herdr tab <subcommand>", "Tab helpers over the socket API"),
+            (
+                "herdr notification <subcommand>",
+                "Notification helpers over the socket API",
+            ),
             (
                 "herdr agent <subcommand>",
                 "Agent/terminal helpers over the socket API",
@@ -619,11 +658,11 @@ fn main() -> io::Result<()> {
         }
         let _ = execute!(
             io::stdout(),
-            PopKeyboardEnhancementFlags,
             DisableFocusChange,
             DisableBracketedPaste,
             DisableMouseCapture
         );
+        let _ = pop_keyboard_enhancement_flags();
         ratatui::restore();
         original_hook(info);
     }));
@@ -648,12 +687,8 @@ fn main() -> io::Result<()> {
         } else {
             execute!(io::stdout(), DisableMouseCapture)?;
         }
-        execute!(
-            io::stdout(),
-            EnableBracketedPaste,
-            EnableFocusChange,
-            PushKeyboardEnhancementFlags(crate::input::ime_compatible_keyboard_enhancement_flags())
-        )?;
+        execute!(io::stdout(), EnableBracketedPaste, EnableFocusChange)?;
+        push_keyboard_enhancement_flags()?;
 
         // Some hosts do not honor Kitty keyboard enhancement pushes for
         // Shift+Enter. Enable xterm modifyOtherKeys only on hosts where we
@@ -683,9 +718,9 @@ fn main() -> io::Result<()> {
         if crate::kitty_graphics::is_enabled() {
             crate::kitty_graphics::clear_all_host_graphics()?;
         }
+        pop_keyboard_enhancement_flags()?;
         execute!(
             io::stdout(),
-            PopKeyboardEnhancementFlags,
             DisableFocusChange,
             DisableBracketedPaste,
             DisableMouseCapture

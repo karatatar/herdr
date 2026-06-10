@@ -7,17 +7,11 @@ use super::super::{has_braille_spinner, AgentState};
 /// status line such as "⠋ Waiting… 1.8s" plus live controls like
 /// "Ctrl+c:cancel" and "Ctrl+Enter:interject".
 pub(super) fn detect(content: &str) -> AgentState {
-    let lower = content.to_lowercase();
-
-    if lower.contains("use ← → to choose permission whitelist scope")
-        || lower.contains("yes, proceed")
-        || lower.contains("no, reject")
-        || lower.contains("ctrl+o:yolo")
-        || lower.contains(":scope")
-    {
+    if has_visible_blocker(content) {
         return AgentState::Blocked;
     }
 
+    let lower = content.to_lowercase();
     if has_braille_spinner(content)
         && (lower.contains("waiting")
             || lower.contains("run ")
@@ -33,4 +27,11 @@ pub(super) fn detect(content: &str) -> AgentState {
     }
 
     AgentState::Idle
+}
+
+pub(super) fn has_visible_blocker(content: &str) -> bool {
+    let lower = content.to_lowercase();
+    let has_scope_selector = lower.contains("use ← → to choose permission whitelist scope")
+        || lower.contains("←/→:scope");
+    has_scope_selector && lower.contains("yes, proceed") && lower.contains("no, reject")
 }

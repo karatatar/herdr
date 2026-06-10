@@ -23,7 +23,7 @@ The socket API can:
 
 - create, list, focus, rename, and close workspaces
 - create, list, focus, rename, and close tabs
-- list, inspect, split, rename, read, close, and send input to panes
+- list, inspect, split, swap, focus, resize, rename, read, close, and send input to panes
 - list, inspect, read, send to, rename, focus, start, and attach agents through CLI helpers
 - report custom agent state from hooks and plugins
 - subscribe to events and wait for output or state changes
@@ -51,6 +51,17 @@ herdr pane split 1-1 --direction right
 herdr pane run 1-2 "npm test"
 ```
 
+Inspect and rearrange panes:
+
+```bash
+herdr pane layout --current
+herdr pane neighbor --direction right --current
+herdr pane resize --direction right --amount 0.1 --current
+herdr pane swap --direction right --current
+herdr pane zoom --on --current
+herdr pane split 1-1 --direction right --ratio 0.333
+```
+
 Wait for an agent:
 
 ```bash
@@ -70,15 +81,84 @@ Raw socket method names use dot notation:
 | Area | Methods |
 | --- | --- |
 | Server | `ping`, `server.stop`, `server.reload_config` |
+| Notification | `notification.show` |
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.close` |
-| Pane | `pane.split`, `pane.list`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
+| Pane | `pane.split`, `pane.swap`, `pane.zoom`, `pane.layout`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.send`, `agent.rename`, `agent.focus`, `agent.start` |
 | Events | `events.subscribe`, `events.wait` |
 | Integrations | `integration.install`, `integration.uninstall` |
 
 Some CLI commands are conveniences around these methods. For example, `herdr agent wait` resolves an agent target and then subscribes to pane agent state events.
+
+Pane control methods use public pane ids such as `1-1`. Omit `pane_id` to use
+the server's active focused pane.
+
+```json
+{"id":"req_layout","method":"pane.layout","params":{"pane_id":"1-1"}}
+{"id":"req_neighbor","method":"pane.neighbor","params":{"pane_id":"1-1","direction":"right"}}
+{"id":"req_edges","method":"pane.edges","params":{"pane_id":"1-1"}}
+{"id":"req_focus","method":"pane.focus_direction","params":{"direction":"right"}}
+{"id":"req_resize","method":"pane.resize","params":{"pane_id":"1-1","direction":"right","amount":0.1}}
+{"id":"req_zoom","method":"pane.zoom","params":{"pane_id":"1-1","mode":"toggle"}}
+{"id":"req_split","method":"pane.split","params":{"direction":"right","ratio":0.333}}
+```
+
+`pane.layout` returns the tab layout snapshot with `workspace_id`, `tab_id`,
+`zoomed`, outer `area`, `focused_pane_id`, pane rects, and split rects/ratios.
+`pane.neighbor` and `pane.edges` include that same layout snapshot so clients
+can make the next decision without private layout state.
+
+`pane.swap` supports directional and explicit forms:
+
+```json
+{"id":"req_swap_dir","method":"pane.swap","params":{"pane_id":"1-1","direction":"right"}}
+{"id":"req_swap_explicit","method":"pane.swap","params":{"source_pane_id":"1-1","target_pane_id":"1-2"}}
+```
+
+Swap is same-tab only. It preserves split shape, split ratios, pane ids, and
+running processes. The response is `type: "pane_swap"` with `changed`, optional
+`reason`, `source_pane_id`, optional `target_pane_id`, `focused_pane_id`, and
+`layout`. Reason values are `no_neighbor`, `same_pane`, `not_found`, and
+`cross_tab`. When a tab is zoomed, swap keeps zoom active and mutates the hidden
+full-tab layout.
+
+`pane.zoom` toggles, enables, or disables zoom for the target pane's tab:
+
+```json
+{"id":"req_zoom_toggle","method":"pane.zoom","params":{"pane_id":"1-1"}}
+{"id":"req_zoom_on","method":"pane.zoom","params":{"pane_id":"1-1","mode":"on"}}
+{"id":"req_zoom_off","method":"pane.zoom","params":{"pane_id":"1-1","mode":"off"}}
+```
+
+Omitting `pane_id` targets the server's active focused pane. The response is
+`type: "pane_zoom"` with `changed`, `zoom_changed`, `focus_changed`, optional
+`reason`, `pane_id`, `focused_pane_id`, `zoomed`, and `layout`. `changed` is
+true when either zoom state or focus changed. Reason values are `single_pane`,
+`already_zoomed`, and `already_unzoomed`.
+
+The CLI wrapper for `notification.show` is:
+
+```bash
+herdr notification show "build failed" --body "api workspace" --position top-left --sound request
+```
+
+Show a user notification through the configured toast delivery:
+
+```json
+{"id":"req_notify","method":"notification.show","params":{"title":"build failed","body":"api workspace","position":"top-left","sound":"request"}}
+```
+
+`title` is required and must contain visible text after control characters and repeated whitespace are removed. `body` is optional. Herdr collapses newlines, tabs, carriage returns, and repeated whitespace into spaces, then trims notification text to 80 characters for `title` and 240 characters for `body`. An empty sanitized `title` returns `invalid_params`. `position` is optional and applies only when `ui.toast.delivery = "herdr"`; desktop positions are relative to the full Herdr frame, and omitted positions use `ui.toast.herdr.position`. Terminal, system, and off delivery ignore `position`. `sound` is optional and can be `none`, `done`, or `request`; it defaults to `none` and plays only when the notification is shown.
+
+The response reports whether anything was shown:
+
+```json
+{"id":"req_notify","result":{"type":"notification_show","shown":true,"reason":"shown"}}
+```
+
+Possible reasons are `shown`, `disabled`, `rate_limited`, `no_foreground_client`, and `busy`. `disabled` means `ui.toast.delivery = "off"`. `busy` means an existing in-app toast was not replaced. Terminal and system delivery are best-effort through the current foreground attached Herdr client.
 
 Worktree methods manage Git checkouts as Herdr workspaces. `worktree.create` creates a checkout and returns the new `workspace`, `tab`, `root_pane`, and `worktree` records. `worktree.open` opens an existing checkout or returns the already-open workspace. `worktree.remove` runs `git worktree remove` against a linked child workspace and never deletes the branch.
 

@@ -4,11 +4,7 @@ pub(super) fn detect(content: &str) -> AgentState {
     let lower = content.to_lowercase();
 
     // Blocked
-    if lower.contains("esc to cancel")
-        && (lower.contains("enter to select")
-            || lower.contains("enter to confirm")
-            || lower.contains("enter to submit"))
-    {
+    if has_visible_blocker(content) {
         return AgentState::Blocked;
     }
 
@@ -21,4 +17,12 @@ pub(super) fn detect(content: &str) -> AgentState {
     }
 
     AgentState::Idle
+}
+
+pub(super) fn has_visible_blocker(content: &str) -> bool {
+    let lower = content.to_lowercase();
+    lower.contains("esc to cancel")
+        && (lower.contains("enter to select")
+            || lower.contains("enter to confirm")
+            || lower.contains("enter to submit"))
 }

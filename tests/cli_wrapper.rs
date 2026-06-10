@@ -622,166 +622,41 @@ fn codex_hook_reports_session_id_from_stdin() {
 }
 
 #[test]
-fn copilot_hook_maps_turn_lifecycle() {
-    let session_start_idle = run_copilot_hook(
+fn copilot_hook_reports_session_id_from_stdin() {
+    let request = run_copilot_hook(
         r#"{"hook_event_name":"SessionStart","session_id":"copilot-session","source":"resume"}"#,
     )
-    .expect("copilot session start without prompt should report idle");
-    assert_eq!(session_start_idle["method"], "pane.report_agent");
-    assert_eq!(session_start_idle["params"]["state"], "idle");
-    assert_eq!(
-        session_start_idle["params"]["agent_session_id"],
-        "copilot-session"
-    );
+    .expect("copilot session start should report session identity");
 
-    let session_start_working = run_copilot_hook(
-        r#"{"hook_event_name":"SessionStart","sessionId":"copilot-session","initialPrompt":"run tests"}"#,
-    )
-    .expect("copilot session start with prompt should report working");
-    assert_eq!(session_start_working["method"], "pane.report_agent");
-    assert_eq!(session_start_working["params"]["state"], "working");
-    assert_eq!(
-        session_start_working["params"]["agent_session_id"],
-        "copilot-session"
-    );
+    assert_eq!(request["method"], "pane.report_agent_session");
+    assert_eq!(request["params"]["agent"], "copilot");
+    assert_eq!(request["params"]["agent_session_id"], "copilot-session");
+    assert!(request["params"].get("state").is_none());
 
-    let working = run_copilot_hook(
-        r#"{"hook_event_name":"UserPromptSubmit","session_id":"copilot-session","prompt":"run tests"}"#,
-    )
-    .expect("copilot prompt should report working");
-    assert_eq!(working["method"], "pane.report_agent");
-    assert_eq!(working["params"]["agent"], "copilot");
-    assert_eq!(working["params"]["state"], "working");
-    assert_eq!(working["params"]["agent_session_id"], "copilot-session");
-
-    let idle = run_copilot_hook(
-        r#"{"hook_event_name":"agentStop","session_id":"copilot-session","stop_reason":"end_turn"}"#,
-    )
-    .expect("copilot stop should report idle");
-    assert_eq!(idle["method"], "pane.report_agent");
-    assert_eq!(idle["params"]["state"], "idle");
-}
-
-#[test]
-fn copilot_hook_maps_camel_case_payloads() {
-    let session_start = run_copilot_hook(
+    let camel = run_copilot_hook(
         r#"{"sessionId":"copilot-camel-session","source":"new","initialPrompt":"run tests"}"#,
     )
-    .expect("copilot camelCase session start should report working");
-    assert_eq!(session_start["method"], "pane.report_agent");
-    assert_eq!(session_start["params"]["state"], "working");
-    assert_eq!(
-        session_start["params"]["agent_session_id"],
-        "copilot-camel-session"
-    );
+    .expect("copilot camelCase session start should report session identity");
 
-    let prompt =
-        run_copilot_hook(r#"{"sessionId":"copilot-camel-session","prompt":"continue the task"}"#)
-            .expect("copilot camelCase prompt should report working");
-    assert_eq!(prompt["method"], "pane.report_agent");
-    assert_eq!(prompt["params"]["state"], "working");
-
-    let blocker = run_copilot_hook(
-        r#"{"sessionId":"copilot-camel-session","toolName":"ask_user","toolArgs":{}}"#,
-    )
-    .expect("copilot camelCase ask_user should report blocked");
-    assert_eq!(blocker["method"], "pane.report_agent");
-    assert_eq!(blocker["params"]["state"], "blocked");
-
-    let answered = run_copilot_hook(
-        r#"{"sessionId":"copilot-camel-session","toolName":"ask_user","toolArgs":{},"toolResult":{"resultType":"success","textResultForLlm":"ok"}}"#,
-    )
-    .expect("copilot camelCase postToolUse should report working");
-    assert_eq!(answered["method"], "pane.report_agent");
-    assert_eq!(answered["params"]["state"], "working");
-
-    let idle = run_copilot_hook(
-        r#"{"sessionId":"copilot-camel-session","stopReason":"end_turn","transcriptPath":"/tmp/transcript.jsonl"}"#,
-    )
-    .expect("copilot camelCase agentStop should report idle");
-    assert_eq!(idle["method"], "pane.report_agent");
-    assert_eq!(idle["params"]["state"], "idle");
-
-    let user_exit =
-        run_copilot_hook(r#"{"sessionId":"copilot-camel-session","reason":"user_exit"}"#)
-            .expect("copilot camelCase user exit should release");
-    assert_eq!(user_exit["method"], "pane.release_agent");
-    assert_eq!(user_exit["params"]["agent"], "copilot");
+    assert_eq!(camel["method"], "pane.report_agent_session");
+    assert_eq!(camel["params"]["agent_session_id"], "copilot-camel-session");
+    assert!(camel["params"].get("state").is_none());
 }
 
 #[test]
-fn copilot_hook_maps_user_prompts_and_notifications() {
-    let ask_user = run_copilot_hook(
+fn copilot_hook_does_not_report_lifecycle_state() {
+    for payload in [
+        r#"{"hook_event_name":"UserPromptSubmit","session_id":"copilot-session","prompt":"run tests"}"#,
         r#"{"hook_event_name":"PreToolUse","session_id":"copilot-session","tool_name":"ask_user"}"#,
-    )
-    .expect("copilot ask_user should report blocked");
-    assert_eq!(ask_user["method"], "pane.report_agent");
-    assert_eq!(ask_user["params"]["state"], "blocked");
-
-    let stale_report_intent = run_copilot_hook(
-        r#"{"hook_event_name":"PostToolUse","session_id":"copilot-session","tool_name":"report_intent","tool_result":{"text_result_for_llm":"ok"}}"#,
-    );
-    assert!(
-        stale_report_intent.is_none(),
-        "postToolUse report_intent must not clear a pending ask_user prompt"
-    );
-
-    let ask_user_answered = run_copilot_hook(
-        r#"{"hook_event_name":"PostToolUse","session_id":"copilot-session","tool_name":"ask_user","tool_result":{"text_result_for_llm":"Blue"}}"#,
-    )
-    .expect("copilot answered ask_user should report working");
-    assert_eq!(ask_user_answered["method"], "pane.report_agent");
-    assert_eq!(ask_user_answered["params"]["state"], "working");
-
-    let exit_plan_mode = run_copilot_hook(
-        r#"{"hook_event_name":"PreToolUse","session_id":"copilot-session","tool_name":"exit_plan_mode"}"#,
-    )
-    .expect("copilot exit_plan_mode should report blocked");
-    assert_eq!(exit_plan_mode["method"], "pane.report_agent");
-    assert_eq!(exit_plan_mode["params"]["state"], "blocked");
-
-    let exit_plan_answered = run_copilot_hook(
-        r#"{"hook_event_name":"PostToolUse","session_id":"copilot-session","tool_name":"exit_plan_mode","tool_result":{"text_result_for_llm":"Approved"}}"#,
-    )
-    .expect("copilot answered exit_plan_mode should report working");
-    assert_eq!(exit_plan_answered["method"], "pane.report_agent");
-    assert_eq!(exit_plan_answered["params"]["state"], "working");
-
-    let notification = run_copilot_hook(
         r#"{"hook_event_name":"notification","session_id":"copilot-session","notification_type":"permission_prompt"}"#,
-    )
-    .expect("copilot permission notification should report blocked");
-    assert_eq!(notification["method"], "pane.report_agent");
-    assert_eq!(notification["params"]["state"], "blocked");
-
-    let permission_approved_tool = run_copilot_hook(
-        r#"{"hook_event_name":"PostToolUse","session_id":"copilot-session","tool_name":"bash","tool_result":{"text_result_for_llm":"ok"}}"#,
-    )
-    .expect("copilot completed tool should report working after permission prompt");
-    assert_eq!(permission_approved_tool["method"], "pane.report_agent");
-    assert_eq!(permission_approved_tool["params"]["state"], "working");
-
-    let agent_idle = run_copilot_hook(
-        r#"{"hook_event_name":"notification","session_id":"copilot-session","notification_type":"agent_idle"}"#,
-    )
-    .expect("copilot agent_idle notification should report idle");
-    assert_eq!(agent_idle["method"], "pane.report_agent");
-    assert_eq!(agent_idle["params"]["state"], "idle");
-}
-
-#[test]
-fn copilot_hook_releases_on_user_exit_only() {
-    let complete = run_copilot_hook(
-        r#"{"hook_event_name":"SessionEnd","session_id":"copilot-session","reason":"complete"}"#,
-    );
-    assert!(complete.is_none());
-
-    let user_exit = run_copilot_hook(
+        r#"{"hook_event_name":"agentStop","session_id":"copilot-session","stop_reason":"end_turn"}"#,
         r#"{"hook_event_name":"SessionEnd","session_id":"copilot-session","reason":"user_exit"}"#,
-    )
-    .expect("copilot user exit should release");
-    assert_eq!(user_exit["method"], "pane.release_agent");
-    assert_eq!(user_exit["params"]["agent"], "copilot");
+    ] {
+        assert!(
+            run_copilot_hook(payload).is_none(),
+            "copilot session-only hook should ignore lifecycle payload {payload}"
+        );
+    }
 }
 
 #[test]
@@ -1398,7 +1273,7 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {full_stdout}"
     );
     assert!(
-        full_stdout.contains("  protocol: 12"),
+        full_stdout.contains("  protocol: 13"),
         "stdout: {full_stdout}"
     );
     assert!(full_stdout.contains("server:\n"), "stdout: {full_stdout}");
@@ -1431,7 +1306,7 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {server_stdout}"
     );
     assert!(
-        server_stdout.contains("protocol: 12"),
+        server_stdout.contains("protocol: 13"),
         "stdout: {server_stdout}"
     );
 
@@ -1443,7 +1318,7 @@ fn status_commands_report_client_and_server_versions() {
         "stdout: {client_stdout}"
     );
     assert!(
-        client_stdout.contains("protocol: 12"),
+        client_stdout.contains("protocol: 13"),
         "stdout: {client_stdout}"
     );
     assert!(
@@ -1453,7 +1328,7 @@ fn status_commands_report_client_and_server_versions() {
 
     let full_json = run_cli_json(&socket_path, &["status", "--json"]);
     assert_eq!(full_json["client"]["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(full_json["client"]["protocol"], 12);
+    assert_eq!(full_json["client"]["protocol"], 13);
     assert_eq!(full_json["server"]["status"], "running");
     assert_eq!(full_json["server"]["running"], true);
     assert_eq!(full_json["server"]["compatible"], true);
@@ -1467,12 +1342,12 @@ fn status_commands_report_client_and_server_versions() {
     let server_json = run_cli_json(&socket_path, &["status", "server", "--json"]);
     assert_eq!(server_json["status"], "running");
     assert_eq!(server_json["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(server_json["protocol"], 12);
+    assert_eq!(server_json["protocol"], 13);
     assert_eq!(server_json["compatible"], true);
 
     let client_json = run_cli_json(&socket_path, &["status", "client", "--json"]);
     assert_eq!(client_json["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(client_json["protocol"], 12);
+    assert_eq!(client_json["protocol"], 13);
     assert!(client_json["binary"]
         .as_str()
         .is_some_and(|path| !path.is_empty()));
@@ -2779,7 +2654,7 @@ fn wait_agent_status_exits_when_idle_status_matches() {
     let fake_pi = bin_dir.join("pi");
     fs::write(
         &fake_pi,
-        "#!/bin/sh\nprintf 'Working...\\n'\nsleep 1\nprintf '\\033[2J\\033[Hdone\\n'\n",
+        "#!/bin/sh\nprintf 'starting\\n'\nsleep 4\nprintf 'Working...\\n'\nsleep 1\nprintf '\\033[2J\\033[Hdone\\n'\n",
     )
     .unwrap();
     #[cfg(unix)]
@@ -2822,7 +2697,7 @@ fn wait_agent_status_exits_when_idle_status_matches() {
             "--status",
             "idle",
             "--timeout",
-            "5000",
+            "10000",
         ],
     );
     assert!(
@@ -2907,7 +2782,7 @@ fn wait_agent_status_exits_when_done_status_matches() {
     let fake_pi = bin_dir.join("pi");
     fs::write(
         &fake_pi,
-        "#!/bin/sh\nprintf 'Working...\\n'\nsleep 1\nprintf '\\033[2J\\033[Hdone\\n'\n",
+        "#!/bin/sh\nprintf 'starting\\n'\nsleep 4\nprintf 'Working...\\n'\nsleep 1\nprintf '\\033[2J\\033[Hdone\\n'\n",
     )
     .unwrap();
     #[cfg(unix)]
@@ -2962,7 +2837,7 @@ fn wait_agent_status_exits_when_done_status_matches() {
             "--status",
             "done",
             "--timeout",
-            "5000",
+            "10000",
         ],
     );
     assert!(

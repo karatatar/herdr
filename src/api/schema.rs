@@ -2,14 +2,18 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub mod panes;
+
+pub use panes::*;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
     pub id: String,
     #[serde(flatten)]
     pub method: Method,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params")]
 pub enum Method {
     #[serde(rename = "ping")]
@@ -20,6 +24,8 @@ pub enum Method {
     ServerLiveHandoff(ServerLiveHandoffParams),
     #[serde(rename = "server.reload_config")]
     ServerReloadConfig(EmptyParams),
+    #[serde(rename = "notification.show")]
+    NotificationShow(NotificationShowParams),
     #[serde(rename = "workspace.create")]
     WorkspaceCreate(WorkspaceCreateParams),
     #[serde(rename = "workspace.list")]
@@ -68,6 +74,20 @@ pub enum Method {
     AgentStart(AgentStartParams),
     #[serde(rename = "pane.split")]
     PaneSplit(PaneSplitParams),
+    #[serde(rename = "pane.swap")]
+    PaneSwap(PaneSwapParams),
+    #[serde(rename = "pane.zoom")]
+    PaneZoom(PaneZoomParams),
+    #[serde(rename = "pane.layout")]
+    PaneLayout(PaneLayoutParams),
+    #[serde(rename = "pane.neighbor")]
+    PaneNeighbor(PaneNeighborParams),
+    #[serde(rename = "pane.edges")]
+    PaneEdges(PaneEdgesParams),
+    #[serde(rename = "pane.focus_direction")]
+    PaneFocusDirection(PaneFocusDirectionParams),
+    #[serde(rename = "pane.resize")]
+    PaneResize(PaneResizeParams),
     #[serde(rename = "pane.list")]
     PaneList(PaneListParams),
     #[serde(rename = "pane.get")]
@@ -111,6 +131,50 @@ pub struct EmptyParams {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PingParams {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationShowParams {
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<crate::config::ToastHerdrPosition>,
+    #[serde(default, skip_serializing_if = "NotificationShowSound::is_none")]
+    pub sound: NotificationShowSound,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationShowSound {
+    #[default]
+    None,
+    Done,
+    Request,
+}
+
+impl NotificationShowSound {
+    pub fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    pub fn to_sound(self) -> Option<crate::sound::Sound> {
+        match self {
+            Self::None => None,
+            Self::Done => Some(crate::sound::Sound::Done),
+            Self::Request => Some(crate::sound::Sound::Request),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationShowReason {
+    Shown,
+    Disabled,
+    RateLimited,
+    NoForegroundClient,
+    Busy,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceTarget {
@@ -262,59 +326,6 @@ pub struct AgentStartParams {
     pub argv: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneSplitParams {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_id: Option<String>,
-    pub target_pane_id: String,
-    pub direction: SplitDirection,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    #[serde(default)]
-    pub focus: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SplitDirection {
-    Right,
-    Down,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct PaneListParams {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneRenameParams {
-    pub pane_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneSendTextParams {
-    pub pane_id: String,
-    pub text: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneSendKeysParams {
-    pub pane_id: String,
-    pub keys: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneSendInputParams {
-    pub pane_id: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub text: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub keys: Vec<String>,
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerLiveHandoffParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -323,97 +334,6 @@ pub struct ServerLiveHandoffParams {
     pub expected_protocol: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_version: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneReadParams {
-    pub pane_id: String,
-    pub source: ReadSource,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lines: Option<u32>,
-    #[serde(default)]
-    pub format: ReadFormat,
-    #[serde(default = "default_true")]
-    pub strip_ansi: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneReportAgentParams {
-    pub pane_id: String,
-    pub source: String,
-    pub agent: String,
-    pub state: PaneAgentState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub custom_status: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seq: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_session_path: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneReportAgentSessionParams {
-    pub pane_id: String,
-    pub source: String,
-    pub agent: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seq: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_session_path: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneReportMetadataParams {
-    pub pane_id: String,
-    pub source: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub applies_to_source: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_agent: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub custom_status: Option<String>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub state_labels: HashMap<String, String>,
-    #[serde(default)]
-    pub clear_title: bool,
-    #[serde(default)]
-    pub clear_display_agent: bool,
-    #[serde(default)]
-    pub clear_custom_status: bool,
-    #[serde(default)]
-    pub clear_state_labels: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seq: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ttl_ms: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneClearAgentAuthorityParams {
-    pub pane_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seq: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneReleaseAgentParams {
-    pub pane_id: String,
-    pub source: String,
-    pub agent: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seq: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -527,8 +447,10 @@ pub enum IntegrationTarget {
     Droid,
     Kimi,
     Opencode,
+    Kilo,
     Hermes,
     Qodercli,
+    Cursor,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -628,7 +550,7 @@ pub enum EventKind {
     PaneAgentStatusChanged,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SuccessResponse {
     pub id: String,
     pub result: ResponseResult,
@@ -651,7 +573,7 @@ pub struct ServerCapabilities {
     pub live_handoff: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseResult {
     Pong {
@@ -719,6 +641,27 @@ pub enum ResponseResult {
     PaneList {
         panes: Vec<PaneInfo>,
     },
+    PaneSwap {
+        swap: PaneSwapResult,
+    },
+    PaneZoom {
+        zoom: PaneZoomResult,
+    },
+    PaneLayout {
+        layout: PaneLayoutSnapshot,
+    },
+    PaneNeighbor {
+        neighbor: PaneNeighborResult,
+    },
+    PaneEdges {
+        edges: PaneEdgesResult,
+    },
+    PaneFocusDirection {
+        focus: PaneFocusDirectionResult,
+    },
+    PaneResize {
+        resize: PaneResizeResult,
+    },
     PaneRead {
         read: PaneReadResult,
     },
@@ -731,6 +674,10 @@ pub enum ResponseResult {
         revision: u64,
         matched_line: Option<String>,
         read: PaneReadResult,
+    },
+    NotificationShow {
+        shown: bool,
+        reason: NotificationShowReason,
     },
     IntegrationInstall {
         target: IntegrationTarget,
@@ -835,52 +782,11 @@ pub struct AgentInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneInfo {
-    pub pane_id: String,
-    pub terminal_id: String,
-    pub workspace_id: String,
-    pub tab_id: String,
-    pub focused: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub foreground_cwd: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display_agent: Option<String>,
-    pub agent_status: AgentStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub custom_status: Option<String>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub state_labels: HashMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_session: Option<AgentSessionInfo>,
-    pub revision: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentSessionInfo {
     pub source: String,
     pub agent: String,
     pub kind: crate::agent_resume::AgentSessionRefKind,
     pub value: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PaneReadResult {
-    pub pane_id: String,
-    pub workspace_id: String,
-    pub tab_id: String,
-    pub source: ReadSource,
-    pub format: ReadFormat,
-    pub text: String,
-    pub revision: u64,
-    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1207,6 +1113,34 @@ mod tests {
         assert_eq!(json["method"], "server.reload_config");
         let restored: Request = serde_json::from_value(json).unwrap();
         assert_eq!(restored, request);
+    }
+
+    #[test]
+    fn notification_show_request_parses() {
+        let json = r#"{"id":"req_1","method":"notification.show","params":{"title":"build failed","body":"api workspace","position":"top-left","sound":"request"}}"#;
+        let request: Request = serde_json::from_str(json).unwrap();
+        let Method::NotificationShow(params) = request.method else {
+            panic!("wrong method parsed");
+        };
+        assert_eq!(params.title, "build failed");
+        assert_eq!(params.body.as_deref(), Some("api workspace"));
+        assert_eq!(
+            params.position,
+            Some(crate::config::ToastHerdrPosition::TopLeft)
+        );
+        assert_eq!(params.sound, NotificationShowSound::Request);
+    }
+
+    #[test]
+    fn notification_show_sound_defaults_to_none() {
+        let json =
+            r#"{"id":"req_1","method":"notification.show","params":{"title":"build failed"}}"#;
+        let request: Request = serde_json::from_str(json).unwrap();
+        let Method::NotificationShow(params) = request.method else {
+            panic!("wrong method parsed");
+        };
+
+        assert_eq!(params.sound, NotificationShowSound::None);
     }
 
     #[test]

@@ -7,3 +7,7 @@ pub(super) fn detect(content: &str) -> AgentState {
 
     super::opencode::detect(content)
 }
+
+pub(super) fn has_visible_blocker(content: &str) -> bool {
+    super::opencode::has_visible_blocker(content)
+}

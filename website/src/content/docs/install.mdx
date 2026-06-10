@@ -31,6 +31,8 @@ If you already use mise:
 mise use -g herdr
 ```
 
+If mise reports `herdr not found in mise tool registry`, update mise and retry. Older mise versions predate the Herdr registry entry; `mise use -g github:ogulcancelik/herdr` works as a temporary fallback.
+
 ## Verify
 
 Start Herdr:
@@ -130,4 +132,4 @@ mv herdr-linux-x86_64 ~/.local/bin/herdr
 
 ## Requirements
 
-Herdr supports Linux and macOS. Native Windows support is not available yet; use Herdr inside WSL for now.
+Stable Herdr releases support Linux and macOS. Native Windows builds are preview-only beta releases; stable users on Windows should use Herdr inside WSL for now.

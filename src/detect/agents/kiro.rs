@@ -7,7 +7,7 @@ use super::super::AgentState;
 pub(super) fn detect(content: &str) -> AgentState {
     let lower = content.to_lowercase();
 
-    if has_kiro_blocked_prompt(&lower) {
+    if has_visible_blocker(content) {
         return AgentState::Blocked;
     }
 
@@ -20,8 +20,9 @@ pub(super) fn detect(content: &str) -> AgentState {
     AgentState::Idle
 }
 
-fn has_kiro_blocked_prompt(lower_content: &str) -> bool {
-    has_tool_approval_prompt(lower_content) || has_subagent_approval_prompt(lower_content)
+pub(super) fn has_visible_blocker(content: &str) -> bool {
+    let lower_content = content.to_lowercase();
+    has_tool_approval_prompt(&lower_content) || has_subagent_approval_prompt(&lower_content)
 }
 
 fn has_tool_approval_prompt(lower_content: &str) -> bool {

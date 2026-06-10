@@ -273,7 +273,7 @@ fn ping_over_socket_returns_version() {
     assert_eq!(value["result"]["version"], env!("CARGO_PKG_VERSION"));
     // Intentionally hardcoded so wire protocol bumps require updating this test.
     // Changing this value means old clients/servers are no longer compatible.
-    assert_eq!(value["result"]["protocol"], 12);
+    assert_eq!(value["result"]["protocol"], 13);
 
     cleanup_spawned_herdr(child, base);
 }
@@ -1941,7 +1941,7 @@ fn pane_info_and_subscriptions_expose_done_agent_status() {
     fs::write(
         &fake_pi,
         format!(
-            "#!/bin/sh\nprintf 'Working...\\n'\nsleep 1\nprintf '\\033[2J\\033[Hdone\\n'\nwhile [ ! -f '{}' ]; do sleep 0.05; done\n",
+            "#!/bin/sh\nprintf 'starting\\n'\nsleep 4\nprintf 'Working...\\n'\nsleep 1\nprintf '\\033[2J\\033[Hdone\\n'\nwhile [ ! -f '{}' ]; do sleep 0.05; done\n",
             stop_file.display()
         ),
     )
@@ -2014,7 +2014,7 @@ fn pane_info_and_subscriptions_expose_done_agent_status() {
     );
     assert_eq!(send_enter["result"]["type"], "ok");
 
-    let status_event = reader.read_json_line(Duration::from_secs(8));
+    let status_event = reader.read_json_line(Duration::from_secs(12));
     assert_eq!(status_event["event"], "pane.agent_status_changed");
     assert_eq!(status_event["data"]["pane_id"], background_pane_id);
     assert_eq!(status_event["data"]["agent_status"], "done");

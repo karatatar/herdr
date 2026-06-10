@@ -1120,6 +1120,55 @@ samp {
     color: var(--accent);
 }
 
+.windows-install {
+    display: none;
+    margin-top: 0.85rem;
+    padding-top: 0.85rem;
+    border-top: 1px solid var(--line);
+}
+
+.windows-install-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    font-weight: 600;
+}
+
+.windows-install-heading span {
+    color: var(--ink-soft);
+}
+
+.windows-install-heading a {
+    color: var(--accent);
+    text-decoration: none;
+}
+
+.windows-install-heading a:hover {
+    text-decoration: underline;
+}
+
+.install-card-secondary {
+    margin-top: 0.45rem;
+    background: color-mix(in srgb, var(--term-bg) 82%, transparent);
+}
+
+.install-card-secondary .prompt {
+    font-size: 0.72rem;
+}
+
+.install-card-secondary code {
+    font-size: 0.68rem;
+}
+
+.install-card-secondary button {
+    padding: 0.24rem 0.55rem;
+    font-size: 0.68rem;
+}
+
 .hero-note {
     margin: 0.75rem 0 0;
     color: var(--muted-2);

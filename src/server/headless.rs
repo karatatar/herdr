@@ -16,13 +16,17 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyModifiers, MouseEventKind};
+use interprocess::local_socket::traits::Listener as _;
+#[cfg(windows)]
+use interprocess::local_socket::traits::Stream as _;
+#[cfg(unix)]
+use interprocess::local_socket::ListenerNonblockingMode;
 use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -34,11 +38,15 @@ use crate::api;
 use crate::app;
 use crate::config;
 use crate::events::AppEvent;
-use crate::ipc::{remove_socket_file_if_owned, socket_file_identity, SocketFileIdentity};
+use crate::ipc::{
+    bind_local_listener, remove_socket_file_if_owned, socket_file_identity, LocalListener,
+    SocketFileIdentity,
+};
 use crate::protocol::{
     self, AttachScrollDirection, AttachScrollSource, FrameData, ServerMessage, MAX_FRAME_SIZE,
     MAX_GRAPHICS_FRAME_SIZE,
 };
+#[cfg(unix)]
 use crate::server::client_accept::{
     accept_pending_client_connections, reject_pending_client_connections,
 };
@@ -62,6 +70,27 @@ use crate::protocol::RenderEncoding;
 use crate::server::client_transport::ClientWriter;
 #[cfg(test)]
 use std::fs;
+
+fn sound_notify_message(sound: crate::sound::Sound) -> &'static str {
+    match sound {
+        crate::sound::Sound::Done => "agent done",
+        crate::sound::Sound::Request => "agent attention",
+    }
+}
+
+fn notification_show_response_shown(response: &str) -> bool {
+    let Ok(response) = serde_json::from_str::<api::schema::SuccessResponse>(response) else {
+        return false;
+    };
+    matches!(
+        response.result,
+        api::schema::ResponseResult::NotificationShow { shown: true, .. }
+    )
+}
+
+fn non_empty_body(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_owned())
+}
 
 // ---------------------------------------------------------------------------
 // Loop event enum for the headless server event loop
@@ -146,7 +175,7 @@ const MIN_ROWS: u16 = 24;
 #[allow(dead_code)]
 const SHUTDOWN_API_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How often the idle headless loop wakes to poll the std UnixListener for new
+/// How often the idle headless loop wakes to poll the local listener for new
 /// client connections.
 ///
 /// The listener is non-blocking and not integrated into `tokio::select!`, so
@@ -162,12 +191,16 @@ const CLIENT_ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// The headless server — runs the herdr event loop without a real terminal.
 pub struct HeadlessServer {
     app: app::App,
+    #[cfg(unix)]
     api_tx: Option<api::ApiRequestSender>,
+    #[cfg(unix)]
     api_server: Option<api::ServerHandle>,
-    client_listener: UnixListener,
+    #[cfg(unix)]
+    client_listener: LocalListener,
     client_socket_path: PathBuf,
     client_socket_identity: SocketFileIdentity,
     clients: HashMap<u64, ClientConnection>,
+    #[cfg(unix)]
     next_client_id: u64,
     /// The client currently driving the shared pane runtime size, theme, and input keybindings.
     foreground_client_id: Option<u64>,
@@ -189,6 +222,7 @@ pub struct HeadlessServer {
     /// Flag set while exporting live PTYs to a replacement server.
     handoff_in_progress: bool,
     /// Imported panes get one app-safe resize nudge after the first client attaches.
+    #[cfg(unix)]
     pending_handoff_repaint_nudge: bool,
     /// Flag set by Ctrl+C or `server stop` signal.
     should_quit: Arc<AtomicBool>,
@@ -271,6 +305,51 @@ fn apply_terminal_attach_input(
         .map_err(|err| format!("terminal attach input failed: {err}"))
 }
 
+#[cfg(windows)]
+fn spawn_windows_client_accept_thread(
+    listener: LocalListener,
+    should_quit: Arc<AtomicBool>,
+    server_event_tx: mpsc::Sender<ServerEvent>,
+) {
+    std::thread::spawn(move || {
+        let mut next_client_id = 1_u64;
+        while !should_quit.load(Ordering::Acquire) {
+            let stream = match listener.accept() {
+                Ok(stream) => stream,
+                Err(err) => {
+                    if should_quit.load(Ordering::Acquire) {
+                        break;
+                    }
+                    error!(err = %err, "client listener accept failed");
+                    std::thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
+            };
+
+            let client_id = next_client_id;
+            next_client_id = next_client_id.saturating_add(1);
+
+            if let Err(err) = stream.set_nonblocking(true) {
+                warn!(err = %err, "failed to set client stream nonblocking");
+                continue;
+            }
+
+            let should_quit = should_quit.clone();
+            let server_event_tx = server_event_tx.clone();
+            std::thread::spawn(move || {
+                if let Err(err) = crate::server::client_transport::handle_client_handshake(
+                    stream,
+                    client_id,
+                    &server_event_tx,
+                    &should_quit,
+                ) {
+                    debug!(client_id, err = %err, "client handshake failed");
+                }
+            });
+        }
+    });
+}
+
 impl HeadlessServer {
     /// Creates and starts the headless server.
     ///
@@ -287,30 +366,40 @@ impl HeadlessServer {
         let client_path = client_socket_path();
         prepare_socket_path(&client_path)?;
 
-        let listener = UnixListener::bind(&client_path)?;
+        let listener = bind_local_listener(&client_path)?;
         restrict_socket_permissions(&client_path)?;
         let client_socket_identity = socket_file_identity(&client_path)?;
         info!(path = %client_path.display(), "client protocol socket listening");
 
-        // Set non-blocking on the listener so we can poll it from the event loop.
-        listener.set_nonblocking(true)?;
+        // Set non-blocking on Unix so we can poll it from the event loop.
+        #[cfg(unix)]
+        listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
 
         let should_quit = Arc::new(AtomicBool::new(false));
 
         // Channel for server events from client threads.
         let (server_event_tx, server_event_rx) = mpsc::channel(64);
+        #[cfg(windows)]
+        spawn_windows_client_accept_thread(listener, should_quit.clone(), server_event_tx.clone());
+
         let server_keybindings = app_keybindings(&app);
         let (server_config_diagnostic, server_config_diagnostic_without_keybindings) =
             server_config_diagnostic_summaries(config_diagnostics);
+        #[cfg(not(unix))]
+        let _ = (&api_tx, &api_server);
 
         Ok(Self {
             app,
+            #[cfg(unix)]
             api_tx,
+            #[cfg(unix)]
             api_server,
+            #[cfg(unix)]
             client_listener: listener,
             client_socket_path: client_path,
             client_socket_identity,
             clients: HashMap::new(),
+            #[cfg(unix)]
             next_client_id: 1,
             foreground_client_id: None,
             server_keybindings,
@@ -321,6 +410,7 @@ impl HeadlessServer {
             effective_size: (MIN_COLS, MIN_ROWS),
             shutting_down: false,
             handoff_in_progress: false,
+            #[cfg(unix)]
             pending_handoff_repaint_nudge: false,
             should_quit,
             server_event_rx,
@@ -870,7 +960,7 @@ impl HeadlessServer {
         } else {
             let _ = std::fs::remove_file(crate::api::socket_path());
         }
-        let _ = remove_socket_file_if_owned(&self.client_socket_path, self.client_socket_identity);
+        let _ = remove_socket_file_if_owned(&self.client_socket_path, &self.client_socket_identity);
         if let Err(err) = crate::server::handoff::wait_ready(&mut stream) {
             crate::server::handoff::cleanup_failed_import_child(&mut import_child);
             match self.wait_then_restore_public_sockets_after_failed_handoff() {
@@ -951,10 +1041,10 @@ impl HeadlessServer {
 
         let client_path = client_socket_path();
         prepare_socket_path(&client_path)?;
-        let listener = UnixListener::bind(&client_path)?;
+        let listener = bind_local_listener(&client_path)?;
         restrict_socket_permissions(&client_path)?;
         let client_socket_identity = socket_file_identity(&client_path)?;
-        listener.set_nonblocking(true)?;
+        listener.set_nonblocking(ListenerNonblockingMode::Accept)?;
 
         self.api_server = Some(api_server);
         self.client_listener = listener;
@@ -1167,6 +1257,7 @@ impl HeadlessServer {
     }
 
     /// Accepts pending client connections from the non-blocking listener.
+    #[cfg(unix)]
     fn accept_client_connections(&mut self) -> io::Result<()> {
         if self.handoff_in_progress {
             return reject_pending_client_connections(&self.client_listener);
@@ -1177,6 +1268,13 @@ impl HeadlessServer {
             &self.should_quit,
             &self.server_event_tx,
         )
+    }
+
+    /// Windows named-pipe clients can block in connect unless the server has a
+    /// pending blocking accept. The dedicated accept thread handles that path.
+    #[cfg(windows)]
+    fn accept_client_connections(&mut self) -> io::Result<()> {
+        Ok(())
     }
 
     /// Drains server events from the dedicated channel.
@@ -1297,6 +1395,225 @@ impl HeadlessServer {
             .unwrap_or(crate::detect::AgentState::Unknown)
     }
 
+    fn pane_effective_agent_label(&self, pane_id: crate::layout::PaneId) -> Option<String> {
+        self.app.state.workspaces.iter().find_map(|ws| {
+            ws.tabs.iter().find_map(|tab| {
+                let pane = tab.panes.get(&pane_id)?;
+                self.app
+                    .state
+                    .terminals
+                    .get(&pane.attached_terminal_id)
+                    .and_then(|terminal| terminal.effective_agent_label())
+                    .map(str::to_string)
+            })
+        })
+    }
+
+    fn forward_pane_state_update_notifications_to_clients(
+        &mut self,
+        update: &crate::app::actions::PaneStateUpdate,
+    ) {
+        if self.app.state.toast_config.delay_seconds != 0 {
+            return;
+        }
+
+        let is_active_tab = self
+            .app
+            .state
+            .pane_is_in_active_tab(update.ws_idx, update.pane_id);
+        let suppress_active_tab_notifications =
+            self.active_tab_suppresses_notifications(is_active_tab);
+
+        if self.app.state.sound.allows(update.known_agent) {
+            if let Some(sound) =
+                crate::app::actions::notification_sound_for_state_change_with_agent_labels(
+                    suppress_active_tab_notifications,
+                    update.previous_state,
+                    update.state,
+                    update.previous_agent_label.as_deref(),
+                    update.agent_label.as_deref(),
+                )
+            {
+                self.send_notify_to_foreground_client(
+                    protocol::NotifyKind::Sound,
+                    sound_notify_message(sound),
+                    None,
+                );
+            }
+        }
+
+        if !should_forward_toast_to_clients(self.app.state.toast_config.delivery) {
+            return;
+        }
+        let Some(kind) = crate::app::actions::notification_toast_for_pane_state_update(
+            suppress_active_tab_notifications,
+            update,
+        ) else {
+            return;
+        };
+        let Some(ws) = self.app.state.workspaces.get(update.ws_idx) else {
+            return;
+        };
+        let Some(agent_label) = update.agent_label.as_deref() else {
+            return;
+        };
+        let event_text = match kind {
+            crate::app::state::ToastKind::NeedsAttention => "needs attention",
+            crate::app::state::ToastKind::Finished => "finished",
+            crate::app::state::ToastKind::UpdateInstalled => "updated",
+        };
+        let workspace_label =
+            ws.display_name_from(&self.app.state.terminals, &self.app.terminal_runtimes);
+        let context = crate::app::actions::notification_context(
+            ws,
+            &workspace_label,
+            update.ws_idx,
+            update.pane_id,
+        );
+        self.send_notify_to_foreground_client(
+            toast_notify_kind(self.app.state.toast_config.delivery)
+                .expect("toast forwarding requires a client notification kind"),
+            format!("{agent_label} {event_text}"),
+            non_empty_body(&context),
+        );
+    }
+
+    fn forward_agent_notification_delivery(
+        &mut self,
+        delivery: &crate::app::state::AgentNotificationDelivery,
+    ) {
+        if let Some(sound) = delivery.sound {
+            self.send_notify_to_foreground_client(
+                protocol::NotifyKind::Sound,
+                sound_notify_message(sound),
+                None,
+            );
+        }
+
+        if should_forward_toast_to_clients(self.app.state.toast_config.delivery) {
+            if let Some(toast) = &delivery.client_notification {
+                self.send_notify_to_foreground_client(
+                    toast_notify_kind(self.app.state.toast_config.delivery)
+                        .expect("toast forwarding requires a client notification kind"),
+                    &toast.title,
+                    non_empty_body(&toast.context),
+                );
+            }
+        }
+    }
+
+    fn send_notify_to_foreground_client(
+        &mut self,
+        kind: protocol::NotifyKind,
+        message: impl Into<String>,
+        body: Option<String>,
+    ) -> bool {
+        self.send_to_foreground_client(ServerMessage::Notify {
+            kind,
+            message: message.into(),
+            body,
+        })
+    }
+
+    fn send_flat_toast_to_foreground_client(
+        &mut self,
+        kind: protocol::NotifyKind,
+        message: impl AsRef<str>,
+    ) -> bool {
+        let (title, body) = crate::terminal_notify::split_message(message.as_ref());
+        self.send_notify_to_foreground_client(kind, title, body.map(str::to_string))
+    }
+
+    fn handle_notification_show_api(
+        &mut self,
+        id: String,
+        params: api::schema::NotificationShowParams,
+    ) -> String {
+        use api::schema::{NotificationShowReason, ResponseResult};
+
+        let Some(title) = sanitize_notification_text(&params.title, 80) else {
+            return serde_json::to_string(&api::schema::ErrorResponse {
+                id,
+                error: api::schema::ErrorBody {
+                    code: "invalid_params".into(),
+                    message: "notification title is empty".into(),
+                },
+            })
+            .unwrap_or_else(|_| "{}".to_string());
+        };
+
+        match self.app.state.toast_config.delivery {
+            config::ToastDelivery::Off => {
+                return serde_json::to_string(&api::schema::SuccessResponse {
+                    id,
+                    result: ResponseResult::NotificationShow {
+                        shown: false,
+                        reason: NotificationShowReason::Disabled,
+                    },
+                })
+                .unwrap_or_else(|_| "{}".to_string());
+            }
+            config::ToastDelivery::Herdr => {
+                let sound = params.sound;
+                let response = self.app.handle_api_request_after_internal_events_drained(
+                    api::schema::Request {
+                        id,
+                        method: api::schema::Method::NotificationShow(params),
+                    },
+                );
+                if notification_show_response_shown(&response) {
+                    self.forward_api_notification_sound(sound);
+                }
+                return response;
+            }
+            config::ToastDelivery::Terminal | config::ToastDelivery::System => {}
+        }
+
+        let body = params
+            .body
+            .as_deref()
+            .and_then(|body| sanitize_notification_text(body, 240));
+        if self.app.api_notification_rate_limited(Instant::now()) {
+            return serde_json::to_string(&api::schema::SuccessResponse {
+                id,
+                result: ResponseResult::NotificationShow {
+                    shown: false,
+                    reason: NotificationShowReason::RateLimited,
+                },
+            })
+            .unwrap_or_else(|_| "{}".to_string());
+        }
+        let kind = toast_notify_kind(self.app.state.toast_config.delivery)
+            .expect("terminal/system delivery has notify kind");
+        let shown = self.send_notify_to_foreground_client(kind, title, body);
+        if shown {
+            self.app.mark_api_notification_shown(Instant::now());
+            self.forward_api_notification_sound(params.sound);
+        }
+        let reason = if shown {
+            NotificationShowReason::Shown
+        } else {
+            NotificationShowReason::NoForegroundClient
+        };
+
+        serde_json::to_string(&api::schema::SuccessResponse {
+            id,
+            result: ResponseResult::NotificationShow { shown, reason },
+        })
+        .unwrap_or_else(|_| "{}".to_string())
+    }
+
+    fn forward_api_notification_sound(&mut self, sound: api::schema::NotificationShowSound) {
+        let Some(sound) = sound.to_sound() else {
+            return;
+        };
+        self.send_notify_to_foreground_client(
+            protocol::NotifyKind::Sound,
+            sound_notify_message(sound),
+            None,
+        );
+    }
+
     /// Handles a single internal event with forwarding logic for clipboard,
     /// sound, and toast notifications to connected clients.
     ///
@@ -1327,6 +1644,7 @@ impl HeadlessServer {
                 // is processed. Notifications must follow effective state changes,
                 // not raw fallback reports that may be masked by hook authority.
                 let prev_state = self.pane_effective_state(pane_id_val);
+                let prev_agent_label = self.pane_effective_agent_label(pane_id_val);
 
                 // Handle the state change (updates pane state, sets toast on AppState).
                 // Headless mode disables local sound playback separately from the
@@ -1349,52 +1667,58 @@ impl HeadlessServer {
                     self.active_tab_suppresses_notifications(is_active_tab);
 
                 let next_state = self.pane_effective_state(pane_id_val);
+                let next_agent_label = self.pane_effective_agent_label(pane_id_val);
 
-                if self.app.state.sound.allows(agent_val) {
-                    if let Some(sound) = crate::app::actions::notification_sound_for_state_change(
-                        suppress_active_tab_notifications,
-                        prev_state,
-                        next_state,
-                    ) {
-                        let msg = match sound {
-                            crate::sound::Sound::Done => "agent done",
-                            crate::sound::Sound::Request => "agent attention",
-                        };
-                        self.send_to_foreground_client(ServerMessage::Notify {
-                            kind: protocol::NotifyKind::Sound,
-                            message: msg.to_owned(),
-                        });
+                if self.app.state.toast_config.delay_seconds == 0
+                    && self.app.state.sound.allows(agent_val)
+                {
+                    if let Some(sound) =
+                        crate::app::actions::notification_sound_for_state_change_with_agent_labels(
+                            suppress_active_tab_notifications,
+                            prev_state,
+                            next_state,
+                            prev_agent_label.as_deref(),
+                            next_agent_label.as_deref(),
+                        )
+                    {
+                        self.send_notify_to_foreground_client(
+                            protocol::NotifyKind::Sound,
+                            sound_notify_message(sound),
+                            None,
+                        );
                     }
                 }
 
-                let toast_msg =
-                    if should_forward_toast_to_clients(self.app.state.toast_config.delivery) {
-                        if self.app.state.toast.is_some() && self.app.state.toast != toast_before {
-                            self.app
-                                .state
-                                .toast
-                                .as_ref()
-                                .map(|toast| format!("{}: {}", toast.title, toast.context))
-                        } else {
-                            toast_message_from_state_change(
-                                &self.app.state,
-                                &self.app.terminal_runtimes,
-                                pane_id_val,
-                                suppress_active_tab_notifications,
-                                prev_state,
-                                next_state,
-                            )
-                        }
+                let toast_msg = if self.app.state.toast_config.delay_seconds == 0
+                    && should_forward_toast_to_clients(self.app.state.toast_config.delivery)
+                {
+                    if self.app.state.toast.is_some() && self.app.state.toast != toast_before {
+                        self.app
+                            .state
+                            .toast
+                            .as_ref()
+                            .map(|toast| format!("{}: {}", toast.title, toast.context))
                     } else {
-                        None
-                    };
+                        toast_message_from_state_change(
+                            &self.app.state,
+                            &self.app.terminal_runtimes,
+                            pane_id_val,
+                            suppress_active_tab_notifications,
+                            prev_state,
+                            next_state,
+                            prev_agent_label.as_deref(),
+                        )
+                    }
+                } else {
+                    None
+                };
 
                 if let Some(msg) = toast_msg {
-                    self.send_to_foreground_client(ServerMessage::Notify {
-                        kind: toast_notify_kind(self.app.state.toast_config.delivery)
+                    self.send_flat_toast_to_foreground_client(
+                        toast_notify_kind(self.app.state.toast_config.delivery)
                             .expect("toast forwarding requires a client notification kind"),
-                        message: msg,
-                    });
+                        msg,
+                    );
                 }
 
                 true
@@ -1414,6 +1738,7 @@ impl HeadlessServer {
                 // are already folded into pane.state; raw hook transitions must not
                 // produce a second notification path.
                 let prev_state = self.pane_effective_state(pane_id_val);
+                let prev_agent_label = self.pane_effective_agent_label(pane_id_val);
 
                 self.sync_foreground_client_state();
                 self.app.handle_internal_event(ev);
@@ -1434,52 +1759,58 @@ impl HeadlessServer {
                     self.active_tab_suppresses_notifications(is_active_tab);
 
                 let next_state = self.pane_effective_state(pane_id_val);
+                let next_agent_label = self.pane_effective_agent_label(pane_id_val);
 
-                if self.app.state.sound.allows(agent_val) {
-                    if let Some(sound) = crate::app::actions::notification_sound_for_state_change(
-                        suppress_active_tab_notifications,
-                        prev_state,
-                        next_state,
-                    ) {
-                        let msg = match sound {
-                            crate::sound::Sound::Done => "agent done",
-                            crate::sound::Sound::Request => "agent attention",
-                        };
-                        self.send_to_foreground_client(ServerMessage::Notify {
-                            kind: protocol::NotifyKind::Sound,
-                            message: msg.to_owned(),
-                        });
+                if self.app.state.toast_config.delay_seconds == 0
+                    && self.app.state.sound.allows(agent_val)
+                {
+                    if let Some(sound) =
+                        crate::app::actions::notification_sound_for_state_change_with_agent_labels(
+                            suppress_active_tab_notifications,
+                            prev_state,
+                            next_state,
+                            prev_agent_label.as_deref(),
+                            next_agent_label.as_deref(),
+                        )
+                    {
+                        self.send_notify_to_foreground_client(
+                            protocol::NotifyKind::Sound,
+                            sound_notify_message(sound),
+                            None,
+                        );
                     }
                 }
 
-                let toast_msg =
-                    if should_forward_toast_to_clients(self.app.state.toast_config.delivery) {
-                        if self.app.state.toast.is_some() && self.app.state.toast != toast_before {
-                            self.app
-                                .state
-                                .toast
-                                .as_ref()
-                                .map(|toast| format!("{}: {}", toast.title, toast.context))
-                        } else {
-                            toast_message_from_state_change(
-                                &self.app.state,
-                                &self.app.terminal_runtimes,
-                                pane_id_val,
-                                suppress_active_tab_notifications,
-                                prev_state,
-                                next_state,
-                            )
-                        }
+                let toast_msg = if self.app.state.toast_config.delay_seconds == 0
+                    && should_forward_toast_to_clients(self.app.state.toast_config.delivery)
+                {
+                    if self.app.state.toast.is_some() && self.app.state.toast != toast_before {
+                        self.app
+                            .state
+                            .toast
+                            .as_ref()
+                            .map(|toast| format!("{}: {}", toast.title, toast.context))
                     } else {
-                        None
-                    };
+                        toast_message_from_state_change(
+                            &self.app.state,
+                            &self.app.terminal_runtimes,
+                            pane_id_val,
+                            suppress_active_tab_notifications,
+                            prev_state,
+                            next_state,
+                            prev_agent_label.as_deref(),
+                        )
+                    }
+                } else {
+                    None
+                };
 
                 if let Some(msg) = toast_msg {
-                    self.send_to_foreground_client(ServerMessage::Notify {
-                        kind: toast_notify_kind(self.app.state.toast_config.delivery)
+                    self.send_flat_toast_to_foreground_client(
+                        toast_notify_kind(self.app.state.toast_config.delivery)
                             .expect("toast forwarding requires a client notification kind"),
-                        message: msg,
-                    });
+                        msg,
+                    );
                 }
 
                 true
@@ -1513,11 +1844,11 @@ impl HeadlessServer {
                     };
 
                 if let Some(msg) = toast_msg {
-                    self.send_to_foreground_client(ServerMessage::Notify {
-                        kind: toast_notify_kind(self.app.state.toast_config.delivery)
+                    self.send_flat_toast_to_foreground_client(
+                        toast_notify_kind(self.app.state.toast_config.delivery)
                             .expect("toast forwarding requires a client notification kind"),
-                        message: msg,
-                    });
+                        msg,
+                    );
                 }
 
                 true
@@ -1531,6 +1862,14 @@ impl HeadlessServer {
                             .map(|pane| pane.attached_terminal_id.to_string())
                     })
                 });
+                if let Some(update) = self
+                    .app
+                    .state
+                    .publish_pane_process_exit_if_agent(pane_id_val)
+                {
+                    self.app.emit_pane_state_update(&update);
+                    self.forward_pane_state_update_notifications_to_clients(&update);
+                }
 
                 self.app.handle_internal_event(ev);
 
@@ -1706,6 +2045,7 @@ impl HeadlessServer {
         }
     }
 
+    #[cfg(unix)]
     fn disconnect_all_clients_for_handoff(&mut self) {
         let client_ids = self.clients.keys().copied().collect::<Vec<_>>();
         for client_id in client_ids {
@@ -1804,6 +2144,68 @@ impl HeadlessServer {
     }
 
     /// Handles a server event. Returns true if the event requires a re-render.
+    fn handle_client_input_events(
+        &mut self,
+        client_id: u64,
+        events: Vec<crate::raw_input::RawInputEvent>,
+    ) -> bool {
+        let host_surface_redraw = crate::raw_input::events_require_host_surface_redraw(
+            &events,
+            self.app.state.redraw_on_focus_gained,
+        );
+        if let Some(client) = self.clients.get_mut(&client_id) {
+            if host_surface_redraw {
+                client.request_full_redraw();
+                client.render_pending = true;
+            } else {
+                // Ensure semantic clients receive one post-input frame even if the
+                // semantic buffer compares equal. Terminal-ANSI clients must keep their
+                // server-side blit baseline; resetting it here forces a full redraw on
+                // every keypress and makes remote sessions feel extremely slow.
+                client.request_semantic_redraw_after_input();
+            }
+        }
+        self.update_client_outer_focus_from_events(client_id, &events);
+        let interaction = events_include_interaction(&events);
+        let foreground_changed = if interaction {
+            self.promote_client_to_foreground(client_id)
+        } else {
+            false
+        };
+        if foreground_changed {
+            self.resize_shared_runtime_to_effective_size_before_input();
+        }
+        let theme_changed = self.update_client_host_theme_from_events(client_id, &events);
+        self.app
+            .route_client_events(events, self.foreground_client_id == Some(client_id));
+        if self.app.take_config_reloaded_from_disk() {
+            self.reload_server_config(false);
+        } else {
+            self.sync_foreground_client_state();
+        }
+
+        if self.app.state.detach_requested {
+            self.app.state.detach_requested = false;
+            info!(client_id, "client detach requested via keybind");
+
+            self.send_client_graphics_cleanup(client_id);
+            self.send_to_client(
+                client_id,
+                ServerMessage::ServerShutdown {
+                    reason: Some("detached".to_owned()),
+                },
+            );
+
+            if let Some(client) = self.clients.get_mut(&client_id) {
+                client.writer = None;
+            }
+
+            false
+        } else {
+            foreground_changed || theme_changed || interaction
+        }
+    }
+
     fn handle_server_event(&mut self, ev: ServerEvent) -> bool {
         if self.handoff_in_progress && Self::ignore_client_event_during_handoff(&ev) {
             return false;
@@ -1922,77 +2324,27 @@ impl HeadlessServer {
                 } else {
                     Vec::new()
                 };
-                let host_surface_redraw = crate::raw_input::events_require_host_surface_redraw(
-                    &events,
-                    self.app.state.redraw_on_focus_gained,
-                );
-                if let Some(client) = self.clients.get_mut(&client_id) {
-                    if host_surface_redraw {
-                        client.request_full_redraw();
-                    } else {
-                        // Ensure semantic clients receive one post-input frame even if the
-                        // semantic buffer compares equal. Terminal-ANSI clients must keep their
-                        // server-side blit baseline; resetting it here forces a full redraw on
-                        // every keypress and makes remote sessions feel extremely slow.
-                        client.request_semantic_redraw_after_input();
-                    }
-                }
-                self.update_client_outer_focus_from_events(client_id, &events);
-                let interaction = events_include_interaction(&events);
-                let foreground_changed = if interaction {
-                    self.promote_client_to_foreground(client_id)
-                } else {
-                    false
-                };
-                if foreground_changed {
-                    self.resize_shared_runtime_to_effective_size_before_input();
-                }
-                let theme_changed = self.update_client_host_theme_from_events(client_id, &events);
-                self.app
-                    .route_client_events(events, self.foreground_client_id == Some(client_id));
-                if self.app.take_config_reloaded_from_disk() {
-                    self.reload_server_config(false);
-                } else {
-                    self.sync_foreground_client_state();
-                }
-
-                // Check if the detach keybind was triggered during input processing.
-                if self.app.state.detach_requested {
-                    self.app.state.detach_requested = false;
-                    info!(client_id, "client detach requested via keybind");
-
-                    // Clear client-local host graphics before sending ServerShutdown
-                    // so the outer terminal does not retain stale images.
-                    self.send_client_graphics_cleanup(client_id);
-
-                    // Send a ServerShutdown with "detached" reason to this client
-                    // so it exits cleanly (not with a connection-lost error).
-                    // The client will close its connection after receiving this,
-                    // which triggers a ClientDisconnected event that removes it.
-                    self.send_to_client(
+                self.handle_client_input_events(client_id, events)
+            }
+            ServerEvent::ClientInputEvents { client_id, events } => {
+                if self.handoff_in_progress {
+                    debug!(
                         client_id,
-                        ServerMessage::ServerShutdown {
-                            reason: Some("detached".to_owned()),
-                        },
+                        len = events.len(),
+                        "ignored client input events during handoff"
                     );
-
-                    // Don't remove the client here — let the client disconnect
-                    // naturally after receiving the ServerShutdown. The client's
-                    // read loop will see EOF and the server will get a
-                    // ClientDisconnected event which handles cleanup.
-                    //
-                    // However, we do need to stop sending frames to this client
-                    // since it's detaching. Drop the writer channel so no more
-                    // frames are queued for this client.
-                    if let Some(client) = self.clients.get_mut(&client_id) {
-                        client.writer = None;
-                    }
-
-                    // No re-render needed for remaining clients.
-                    false
-                } else {
-                    foreground_changed || theme_changed || interaction
+                    return false;
                 }
+                debug!(
+                    client_id,
+                    len = events.len(),
+                    "client input events received"
+                );
+                let events = events
+                    .iter()
+                    .map(crate::protocol::ClientInputEvent::to_raw_input_event)
+                    .collect();
+                self.handle_client_input_events(client_id, events)
             }
             ServerEvent::ClientClipboardImage {
                 client_id,
@@ -2152,6 +2504,13 @@ impl HeadlessServer {
             return true;
         }
 
+        if let api::schema::Method::NotificationShow(params) = &msg.request.method {
+            let response =
+                self.handle_notification_show_api(msg.request.id.clone(), params.clone());
+            let _ = msg.respond_to.send(response);
+            return true;
+        }
+
         let mut changed = api::request_changes_ui(&msg.request);
         let skip_default_workspace = matches!(
             &msg.request.method,
@@ -2165,7 +2524,12 @@ impl HeadlessServer {
         // bypasses drain_internal_events_with_forwarding. Headless mode disables
         // local sound playback, so sound notifications need to be forwarded here.
         let toast_before = self.app.state.toast.clone();
-        let pane_states_before: Vec<(usize, crate::layout::PaneId, crate::detect::AgentState)> = {
+        let pane_states_before: Vec<(
+            usize,
+            crate::layout::PaneId,
+            crate::detect::AgentState,
+            Option<String>,
+        )> = {
             let terminals = &self.app.state.terminals;
             self.app
                 .state
@@ -2175,9 +2539,14 @@ impl HeadlessServer {
                 .flat_map(|(ws_idx, ws)| {
                     ws.tabs.iter().flat_map(move |tab| {
                         tab.panes.iter().filter_map(move |(&pane_id, pane)| {
-                            terminals
-                                .get(&pane.attached_terminal_id)
-                                .map(|terminal| (ws_idx, pane_id, terminal.state))
+                            terminals.get(&pane.attached_terminal_id).map(|terminal| {
+                                (
+                                    ws_idx,
+                                    pane_id,
+                                    terminal.state,
+                                    terminal.effective_agent_label().map(str::to_string),
+                                )
+                            })
                         })
                     })
                 })
@@ -2217,31 +2586,31 @@ impl HeadlessServer {
         // Herdr delivery renders the toast in-frame and must not ask clients to
         // show a terminal or system notification.
         let toast_after = self.app.state.toast.clone();
-        let forwarded_toast_from_state =
-            if should_forward_toast_to_clients(self.app.state.toast_config.delivery)
-                && toast_after.is_some()
-                && toast_after != toast_before
-            {
-                if let Some(toast) = &toast_after {
-                    let msg_text = format!("{}: {}", toast.title, toast.context);
-                    debug!(msg = %msg_text, "forwarding toast notification from API request");
-                    self.send_to_foreground_client(ServerMessage::Notify {
-                        kind: toast_notify_kind(self.app.state.toast_config.delivery)
-                            .expect("toast forwarding requires a client notification kind"),
-                        message: msg_text,
-                    });
-                    true
-                } else {
-                    false
-                }
+        let forwarded_toast_from_state = if should_forward_toast_to_clients(
+            self.app.state.toast_config.delivery,
+        ) && toast_after.is_some()
+            && toast_after != toast_before
+        {
+            if let Some(toast) = &toast_after {
+                debug!(title = %toast.title, body = %toast.context, "forwarding toast notification from API request");
+                self.send_notify_to_foreground_client(
+                    toast_notify_kind(self.app.state.toast_config.delivery)
+                        .expect("toast forwarding requires a client notification kind"),
+                    &toast.title,
+                    non_empty_body(&toast.context),
+                );
+                true
             } else {
                 false
-            };
+            }
+        } else {
+            false
+        };
 
         // Forward notifications for effective pane state changes that occurred
         // during the API request. Hook authority is already folded into
         // pane.state, so raw hook transitions must not produce separate sounds.
-        for (ws_idx, pane_id, prev_state) in &pane_states_before {
+        for (ws_idx, pane_id, prev_state, prev_agent_label) in &pane_states_before {
             let pane_after = self
                 .app
                 .state
@@ -2272,6 +2641,7 @@ impl HeadlessServer {
                 self.active_tab_suppresses_notifications(is_active_tab);
 
             let agent = terminal_after.effective_known_agent();
+            let agent_label = terminal_after.effective_agent_label().map(str::to_string);
 
             debug!(
                 ws_idx,
@@ -2283,13 +2653,18 @@ impl HeadlessServer {
             );
 
             if !forwarded_toast_from_state
+                && self.app.state.toast_config.delay_seconds == 0
                 && should_forward_toast_to_clients(self.app.state.toast_config.delivery)
             {
-                if let Some(kind) = crate::app::actions::notification_toast_for_state_change(
-                    suppress_active_tab_notifications,
-                    *prev_state,
-                    new_state,
-                ) {
+                if let Some(kind) =
+                    crate::app::actions::notification_toast_for_state_change_with_agent_labels(
+                        suppress_active_tab_notifications,
+                        *prev_state,
+                        new_state,
+                        prev_agent_label.as_deref(),
+                        agent_label.as_deref(),
+                    )
+                {
                     if let Some(agent_label) = self
                         .app
                         .state
@@ -2306,43 +2681,41 @@ impl HeadlessServer {
                             &self.app.state.terminals,
                             &self.app.terminal_runtimes,
                         );
-                        let msg_text = format!(
-                            "{} {}: {}",
-                            agent_label,
-                            event_text,
-                            crate::app::actions::notification_context(
-                                &self.app.state.workspaces[*ws_idx],
-                                &workspace_label,
-                                *ws_idx,
-                                *pane_id,
-                            )
+                        let context = crate::app::actions::notification_context(
+                            &self.app.state.workspaces[*ws_idx],
+                            &workspace_label,
+                            *ws_idx,
+                            *pane_id,
                         );
-                        self.send_to_foreground_client(ServerMessage::Notify {
-                            kind: toast_notify_kind(self.app.state.toast_config.delivery)
+                        self.send_notify_to_foreground_client(
+                            toast_notify_kind(self.app.state.toast_config.delivery)
                                 .expect("toast forwarding requires a client notification kind"),
-                            message: msg_text,
-                        });
+                            format!("{agent_label} {event_text}"),
+                            non_empty_body(&context),
+                        );
                     }
                 }
             }
 
             // Forward sound notification when server-side sound policy allows it.
             // Clients still decide locally whether they can execute the side effect.
-            if self.app.state.sound.allows(agent) {
-                if let Some(sound) = crate::app::actions::notification_sound_for_state_change(
-                    suppress_active_tab_notifications,
-                    *prev_state,
-                    new_state,
-                ) {
-                    let msg_text = match sound {
-                        crate::sound::Sound::Done => "agent done",
-                        crate::sound::Sound::Request => "agent attention",
-                    };
+            if self.app.state.toast_config.delay_seconds == 0 && self.app.state.sound.allows(agent)
+            {
+                if let Some(sound) =
+                    crate::app::actions::notification_sound_for_state_change_with_agent_labels(
+                        suppress_active_tab_notifications,
+                        *prev_state,
+                        new_state,
+                        prev_agent_label.as_deref(),
+                        agent_label.as_deref(),
+                    )
+                {
                     debug!(sound = ?sound, "forwarding sound notification from API request");
-                    self.send_to_foreground_client(ServerMessage::Notify {
-                        kind: protocol::NotifyKind::Sound,
-                        message: msg_text.to_owned(),
-                    });
+                    self.send_notify_to_foreground_client(
+                        protocol::NotifyKind::Sound,
+                        sound_notify_message(sound),
+                        None,
+                    );
                 }
             }
         }
@@ -2546,7 +2919,7 @@ impl HeadlessServer {
             return false;
         };
         let prepare_started = crate::render_prof::timer();
-        let Some(prepared) = client.render_state.prepare_frame(&frame) else {
+        let Some(prepared) = client.render_state.prepare_frame(frame) else {
             client.render_pending = false;
             crate::render_prof::event("retained_send.skip_identical");
             crate::render_prof::duration_since("retained_send.prepare_frame", prepare_started);
@@ -2582,7 +2955,7 @@ impl HeadlessServer {
         match writer.render.try_send(serialized) {
             Ok(()) => {
                 client.render_pending = false;
-                client.render_state.commit_sent_frame(frame, prepared);
+                client.render_state.commit_sent_frame(prepared);
                 crate::render_prof::event("retained_send.sent");
                 crate::render_prof::duration_since("retained_send.try_send", send_started);
                 true
@@ -2758,21 +3131,21 @@ impl HeadlessServer {
                 commit_graphics_cache = false;
             }
 
+            let max_frame_size = if frame.graphics.is_empty() {
+                MAX_FRAME_SIZE
+            } else {
+                MAX_GRAPHICS_FRAME_SIZE
+            };
+            let has_graphics = !frame.graphics.is_empty();
             let prepare_started = crate::render_prof::timer();
-            let Some(mut prepared) = client.render_state.prepare_frame(&frame) else {
+            let Some(mut prepared) = client.render_state.prepare_frame(frame) else {
                 client.render_pending = false;
                 crate::render_prof::event("full_render.skip_identical");
                 crate::render_prof::duration_since("full_render.prepare_frame", prepare_started);
                 continue;
             };
             crate::render_prof::duration_since("full_render.prepare_frame", prepare_started);
-            let mut frame_to_commit = frame.clone();
 
-            let max_frame_size = if frame.graphics.is_empty() {
-                MAX_FRAME_SIZE
-            } else {
-                MAX_GRAPHICS_FRAME_SIZE
-            };
             let serialize_started = crate::render_prof::timer();
             let serialized = match Self::frame_server_message_with_max(
                 prepared.message(),
@@ -2782,17 +3155,22 @@ impl HeadlessServer {
                     crate::render_prof::duration_since("full_render.serialize", serialize_started);
                     framed
                 }
-                Err(protocol::FramingError::Oversized { claimed, max })
-                    if !frame.graphics.is_empty() =>
-                {
+                Err(protocol::FramingError::Oversized { claimed, max }) if has_graphics => {
                     warn!(
                         client_id,
                         claimed, max, "dropping graphics from oversized frame for client"
                     );
-                    let mut text_only_frame = frame.clone();
+                    let Some(mut text_only_frame) = prepared.into_frame() else {
+                        crate::render_prof::event("full_render.serialize_error");
+                        crate::render_prof::duration_since(
+                            "full_render.serialize",
+                            serialize_started,
+                        );
+                        continue;
+                    };
                     text_only_frame.graphics.clear();
                     let Some(text_only_prepared) =
-                        client.render_state.prepare_frame(&text_only_frame)
+                        client.render_state.prepare_frame(text_only_frame)
                     else {
                         client.render_pending = false;
                         crate::render_prof::event("full_render.skip_identical_text_only");
@@ -2816,7 +3194,6 @@ impl HeadlessServer {
                         }
                     };
                     prepared = text_only_prepared;
-                    frame_to_commit = text_only_frame;
                     commit_graphics_cache = false;
                     crate::render_prof::duration_since("full_render.serialize", serialize_started);
                     framed
@@ -2848,9 +3225,7 @@ impl HeadlessServer {
                         client.graphics_cache = next_graphics_cache;
                         client.graphics_surface_reset_pending = false;
                     }
-                    client
-                        .render_state
-                        .commit_sent_frame(frame_to_commit, prepared);
+                    client.render_state.commit_sent_frame(prepared);
                     crate::render_prof::event("full_render.sent");
                     crate::render_prof::duration_since("full_render.try_send", send_started);
                 }
@@ -2916,6 +3291,25 @@ impl HeadlessServer {
             self.app.toast_deadline = None;
             self.app.state.toast = None;
             changed = true;
+        }
+
+        if self
+            .app
+            .state
+            .next_pending_agent_notification_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            let previous_toast = self.app.state.toast.clone();
+            let mut deliveries = self.app.state.drain_due_agent_notifications(now);
+            if !deliveries.is_empty() {
+                self.app
+                    .refresh_agent_notification_delivery_contexts(&mut deliveries);
+                self.app.sync_toast_deadline(previous_toast);
+                for delivery in &deliveries {
+                    self.forward_agent_notification_delivery(delivery);
+                }
+                changed = true;
+            }
         }
 
         if self
@@ -3062,7 +3456,7 @@ impl HeadlessServer {
     /// Removes socket files created by the server.
     fn cleanup_sockets(&self) -> io::Result<()> {
         if let Err(err) =
-            remove_socket_file_if_owned(&self.client_socket_path, self.client_socket_identity)
+            remove_socket_file_if_owned(&self.client_socket_path, &self.client_socket_identity)
         {
             if err.kind() != io::ErrorKind::NotFound {
                 warn!(
@@ -3108,6 +3502,38 @@ async fn sleep_until_or_pending(deadline: Option<Instant>) {
         Some(deadline) => tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await,
         None => std::future::pending().await,
     }
+}
+
+fn sanitize_notification_text(value: &str, max_chars: usize) -> Option<String> {
+    let mut sanitized = String::new();
+    let mut previous_space = false;
+    for ch in value.chars() {
+        let replacement = if ch == '\n' || ch == '\r' || ch == '\t' {
+            Some(' ')
+        } else if ch.is_control() {
+            None
+        } else {
+            Some(ch)
+        };
+        let Some(ch) = replacement else {
+            continue;
+        };
+        if ch.is_whitespace() {
+            if previous_space {
+                continue;
+            }
+            previous_space = true;
+            sanitized.push(' ');
+        } else {
+            previous_space = false;
+            sanitized.push(ch);
+        }
+        if sanitized.chars().count() >= max_chars {
+            break;
+        }
+    }
+    let sanitized = sanitized.trim().to_string();
+    (!sanitized.is_empty()).then_some(sanitized)
 }
 
 fn server_config_diagnostic_summaries(diagnostics: &[String]) -> (Option<String>, Option<String>) {
@@ -3178,6 +3604,7 @@ pub fn run_server() -> io::Result<()> {
             api_rx,
             event_hub,
         );
+        seed_startup_workspace_if_empty(&mut app);
 
         // The server runs headless — disable local notification side effects.
         // Sound and terminal notifications are forwarded to connected clients
@@ -3214,6 +3641,36 @@ pub fn run_server() -> io::Result<()> {
     rt.shutdown_timeout(Duration::from_millis(100));
     crate::logging::shutdown("server");
     result
+}
+
+fn seed_startup_workspace_if_empty(app: &mut app::App) {
+    let Some(cwd) = take_startup_cwd() else {
+        return;
+    };
+
+    if !app.state.workspaces.is_empty() {
+        info!(
+            cwd = %cwd.display(),
+            "restored session already has workspaces; ignoring startup cwd"
+        );
+        return;
+    }
+
+    match app.create_workspace_with_options(cwd.clone(), true) {
+        Ok(_) => {
+            info!(cwd = %cwd.display(), "created startup workspace");
+        }
+        Err(err) => {
+            warn!(cwd = %cwd.display(), err = %err, "failed to create startup workspace");
+            app.state.mode = app::Mode::Navigate;
+        }
+    }
+}
+
+fn take_startup_cwd() -> Option<PathBuf> {
+    let cwd = std::env::var_os(crate::server::autodetect::STARTUP_CWD_ENV_VAR)?;
+    std::env::remove_var(crate::server::autodetect::STARTUP_CWD_ENV_VAR);
+    (!cwd.is_empty()).then(|| PathBuf::from(cwd))
 }
 
 #[cfg(unix)]
@@ -3288,14 +3745,13 @@ fn run_handoff_import_server(socket_path: &Path, token: &str) -> io::Result<()> 
 
 #[cfg(unix)]
 fn wait_for_old_public_sockets_to_close(timeout: Duration) -> io::Result<()> {
-    use std::os::unix::net::UnixStream;
-
     let deadline = Instant::now() + timeout;
     let api_socket = api::socket_path();
     let client_socket = client_socket_path();
     while Instant::now() < deadline {
-        let api_open = api_socket.exists() && UnixStream::connect(&api_socket).is_ok();
-        let client_open = client_socket.exists() && UnixStream::connect(&client_socket).is_ok();
+        let api_open = api_socket.exists() && crate::ipc::connect_local_stream(&api_socket).is_ok();
+        let client_open =
+            client_socket.exists() && crate::ipc::connect_local_stream(&client_socket).is_ok();
         if !api_open && !client_open {
             return Ok(());
         }
@@ -3359,23 +3815,32 @@ mod tests {
         let _ = fs::create_dir_all(&dir);
         let socket_path = dir.join("client.sock");
         let _ = fs::remove_file(&socket_path);
-        let listener = UnixListener::bind(&socket_path).expect("bind test listener");
+        let listener = bind_local_listener(&socket_path).expect("bind test listener");
         let client_socket_identity =
             socket_file_identity(&socket_path).expect("test listener socket identity");
+        #[cfg(unix)]
         listener
-            .set_nonblocking(true)
+            .set_nonblocking(ListenerNonblockingMode::Accept)
             .expect("set listener nonblocking");
         let (server_event_tx, server_event_rx) = mpsc::channel(64);
+        #[cfg(windows)]
+        let should_quit = Arc::new(AtomicBool::new(false));
+        #[cfg(windows)]
+        spawn_windows_client_accept_thread(listener, should_quit.clone(), server_event_tx.clone());
         let server_keybindings = app_keybindings(&app);
 
         HeadlessServer {
             app,
+            #[cfg(unix)]
             api_tx: None,
+            #[cfg(unix)]
             api_server: None,
+            #[cfg(unix)]
             client_listener: listener,
             client_socket_path: socket_path,
             client_socket_identity,
             clients: HashMap::new(),
+            #[cfg(unix)]
             next_client_id: 1,
             foreground_client_id: None,
             server_keybindings,
@@ -3386,8 +3851,12 @@ mod tests {
             effective_size: (MIN_COLS, MIN_ROWS),
             shutting_down: false,
             handoff_in_progress: false,
+            #[cfg(unix)]
             pending_handoff_repaint_nudge: false,
+            #[cfg(unix)]
             should_quit: Arc::new(AtomicBool::new(false)),
+            #[cfg(windows)]
+            should_quit,
             server_event_rx,
             server_event_tx,
         }
@@ -4162,6 +4631,52 @@ next_tab = ""
     }
 
     #[test]
+    fn terminal_attach_page_key_forwards_in_alternate_screen_without_mouse_reporting() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let _runtime_guard = rt.enter();
+        let mut bytes = b"\x1b[?1049h".to_vec();
+        for line in 0..80 {
+            bytes.extend_from_slice(format!("line {line:02}\r\n").as_bytes());
+        }
+        let (runtime, mut input_rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                20, 5, 4096, &bytes, 4,
+            );
+        runtime.scroll_up(3);
+
+        apply_terminal_attach_scroll(
+            &runtime,
+            AttachScrollSource::PageKey {
+                input: b"\x1b[5~".to_vec(),
+            },
+            AttachScrollDirection::Up,
+            4,
+            None,
+            None,
+            0,
+        )
+        .expect("page key forward");
+
+        assert_eq!(
+            runtime
+                .scroll_metrics()
+                .expect("scroll metrics")
+                .offset_from_bottom,
+            0
+        );
+        assert_eq!(
+            input_rx.try_recv().expect("forwarded page key"),
+            Bytes::from_static(b"\x1b[5~")
+        );
+        drop(runtime);
+        drop(_runtime_guard);
+        rt.shutdown_timeout(Duration::from_millis(100));
+    }
+
+    #[test]
     fn headless_scheduled_tasks_expire_agent_metadata() {
         let mut server = test_headless_server();
         let workspace = crate::workspace::Workspace::test_new("metadata");
@@ -4522,6 +5037,70 @@ next_tab = ""
                 visible: false,
                 shape: cursor.as_ref().map(|c| c.shape).unwrap_or(0),
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn virtual_render_hides_focused_pane_cursor_during_synchronized_output() {
+        let mut state = AppState::test_new();
+        state.reveal_hidden_cursor_for_cjk_ime = true;
+        let mut ws = crate::workspace::Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(20, 5, b"left");
+        ws.insert_test_runtime(pane_id, runtime);
+
+        state.workspaces = vec![ws];
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = crate::app::Mode::Terminal;
+
+        let area = Rect::new(0, 0, 80, 24);
+        let _ = crate::server::render_stream::render_virtual(&mut state, area, true);
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        let runtime = state
+            .runtime_for_pane(&terminal_runtimes, pane_id)
+            .expect("pane runtime after initial render");
+        runtime.test_process_pty_bytes(b"\x1b[?2026h\x1b[2;3H");
+        assert!(runtime.synchronized_output_active());
+
+        let (_buffer, cursor) =
+            crate::server::render_stream::render_virtual(&mut state, area, false);
+
+        assert_eq!(
+            cursor, None,
+            "child cursor positions are unstable while synchronized output is active"
+        );
+    }
+
+    #[tokio::test]
+    async fn virtual_render_hides_focused_pane_cursor_during_synchronized_output_resize() {
+        let mut state = AppState::test_new();
+        let mut ws = crate::workspace::Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(20, 5, b"left");
+        ws.insert_test_runtime(pane_id, runtime);
+
+        state.workspaces = vec![ws];
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = crate::app::Mode::Terminal;
+
+        let initial_area = Rect::new(0, 0, 80, 24);
+        let _ = crate::server::render_stream::render_virtual(&mut state, initial_area, true);
+        let terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
+        let runtime = state
+            .runtime_for_pane(&terminal_runtimes, pane_id)
+            .expect("pane runtime after initial render");
+        runtime.test_process_pty_bytes(b"\x1b[?2026h\x1b[2;3H");
+        assert!(runtime.synchronized_output_active());
+
+        let resized_area = Rect::new(0, 0, 100, 30);
+        let (_buffer, cursor) =
+            crate::server::render_stream::render_virtual(&mut state, resized_area, true);
+
+        assert_eq!(
+            cursor, None,
+            "pre-resize synchronized output should suppress the cursor even if resize clears the mode"
         );
     }
 
@@ -4975,6 +5554,107 @@ next_tab = ""
         assert_eq!(server.app.state.mode, crate::app::Mode::Terminal);
     }
 
+    #[test]
+    fn semantic_client_input_events_route_through_app_input() {
+        let mut server = test_headless_server();
+        server.app.state.mode = crate::app::Mode::Onboarding;
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                Some(true),
+                1,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        assert!(server.handle_server_event(ServerEvent::ClientInputEvents {
+            client_id: 1,
+            events: vec![crate::protocol::ClientInputEvent::Key {
+                code: crate::protocol::ClientKeyCode::Enter,
+                modifiers: 0,
+                kind: crate::protocol::ClientKeyKind::Press,
+            }],
+        }));
+
+        assert_eq!(server.app.state.mode, crate::app::Mode::Settings);
+        assert_eq!(
+            server.app.state.settings.section,
+            crate::app::state::SettingsSection::Integrations
+        );
+    }
+
+    #[test]
+    fn semantic_client_escape_closes_keybind_help() {
+        let mut server = test_headless_server();
+        server.app.state.mode = crate::app::Mode::KeybindHelp;
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (100, 30),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                Some(true),
+                1,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        server.resize_shared_runtime_to_effective_size();
+
+        assert!(server.handle_server_event(ServerEvent::ClientInputEvents {
+            client_id: 1,
+            events: vec![crate::protocol::ClientInputEvent::Key {
+                code: crate::protocol::ClientKeyCode::Esc,
+                modifiers: 0,
+                kind: crate::protocol::ClientKeyKind::Press,
+            }],
+        }));
+
+        assert_eq!(server.app.state.mode, crate::app::Mode::Navigate);
+    }
+
+    #[test]
+    fn semantic_client_down_scrolls_keybind_help() {
+        let mut server = test_headless_server();
+        server.app.state.mode = crate::app::Mode::KeybindHelp;
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (100, 30),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                Some(true),
+                1,
+                RenderEncoding::SemanticFrame,
+                None,
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+        server.resize_shared_runtime_to_effective_size();
+
+        assert!(server.app.state.keybind_help_max_scroll() > 0);
+        assert!(server.handle_server_event(ServerEvent::ClientInputEvents {
+            client_id: 1,
+            events: vec![crate::protocol::ClientInputEvent::Key {
+                code: crate::protocol::ClientKeyCode::Down,
+                modifiers: 0,
+                kind: crate::protocol::ClientKeyKind::Press,
+            }],
+        }));
+
+        assert_eq!(server.app.state.mode, crate::app::Mode::KeybindHelp);
+        assert_eq!(server.app.state.keybind_help.scroll, 1);
+    }
+
     #[tokio::test]
     async fn split_default_background_response_updates_theme_without_forwarding_tail() {
         let mut server = test_headless_server();
@@ -5376,6 +6056,62 @@ next_tab = ""
         }
     }
 
+    #[tokio::test]
+    async fn outer_focus_gained_client_render_pending_survives_semantic_render_queue_full() {
+        let (mut server, client_rx, pane_id) = retained_test_server(b"aaaa");
+
+        server.render_and_stream();
+        let _ = client_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("initial semantic frame");
+
+        let queued = HeadlessServer::frame_server_message(&ServerMessage::ReloadSoundConfig)
+            .expect("serialize dummy message");
+        server
+            .clients
+            .get(&1)
+            .unwrap()
+            .writer
+            .as_ref()
+            .unwrap()
+            .render
+            .send(queued)
+            .expect("pre-fill render queue");
+
+        assert!(server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"\x1b[I".to_vec(),
+        }));
+        assert!(server.clients.get(&1).unwrap().render_pending);
+
+        server.render_and_stream();
+
+        assert!(server.clients.get(&1).unwrap().render_pending);
+        assert!(matches!(
+            read_server_message(client_rx.recv_timeout(Duration::from_millis(100)).unwrap()),
+            ServerMessage::ReloadSoundConfig
+        ));
+
+        let runtime = server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+            .expect("runtime");
+        runtime.test_process_pty_bytes(b"\rZ");
+
+        assert!(!server.render_retained_pty_update_and_stream());
+        assert!(client_rx.recv_timeout(Duration::from_millis(50)).is_err());
+
+        assert!(server.handle_server_event(ServerEvent::ClientWriterDrained { client_id: 1 }));
+        server.render_and_stream();
+
+        assert!(!server.clients.get(&1).unwrap().render_pending);
+        assert!(matches!(
+            read_server_message(client_rx.recv_timeout(Duration::from_millis(100)).unwrap()),
+            ServerMessage::Frame(_)
+        ));
+    }
+
     #[test]
     fn outer_focus_gained_does_not_force_terminal_ansi_full_redraw_when_disabled() {
         let mut server = test_headless_server();
@@ -5420,6 +6156,37 @@ next_tab = ""
                 .unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn outer_focus_gained_does_not_mark_semantic_render_pending_when_disabled() {
+        let mut server = test_headless_server();
+        server.app.state.redraw_on_focus_gained = false;
+        let (client_tx, _client_control_rx, _client_rx) = test_client_writer();
+
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+
+        assert!(server.handle_server_event(ServerEvent::ClientInput {
+            client_id: 1,
+            data: b"\x1b[I".to_vec(),
+        }));
+
+        assert!(!server.clients.get(&1).unwrap().render_pending);
+        assert!(!server.app.full_redraw_pending);
+        assert_eq!(server.clients[&1].outer_terminal_focus, Some(true));
+        assert_eq!(server.app.state.outer_terminal_focus, Some(true));
     }
 
     #[test]
@@ -5590,6 +6357,7 @@ next_tab = ""
             kind: crate::app::state::ToastKind::NeedsAttention,
             title: "pi needs attention".to_owned(),
             context: "background · 2".to_owned(),
+            position: None,
             target: None,
         });
         server.render_and_stream();
@@ -5788,9 +6556,9 @@ next_tab = ""
         frame.cells[hyperlink_idx].hyperlink = Some(0);
         let prepared = client
             .render_state
-            .prepare_frame(&frame)
+            .prepare_frame(frame)
             .expect("hyperlink frame differs");
-        client.render_state.commit_sent_frame(frame, prepared);
+        client.render_state.commit_sent_frame(prepared);
 
         let runtime = server
             .app
@@ -6094,7 +6862,8 @@ next_tab = ""
 
         assert!(server.send_to_foreground_client(ServerMessage::Notify {
             kind: protocol::NotifyKind::Toast,
-            message: "pi finished: workspace 1".to_string(),
+            message: "pi finished".to_string(),
+            body: Some("workspace 1".to_string()),
         }));
 
         match read_server_message(
@@ -6102,9 +6871,14 @@ next_tab = ""
                 .recv_timeout(Duration::from_millis(100))
                 .expect("foreground toast message"),
         ) {
-            ServerMessage::Notify { kind, message } => {
+            ServerMessage::Notify {
+                kind,
+                message,
+                body,
+            } => {
                 assert_eq!(kind, protocol::NotifyKind::Toast);
-                assert_eq!(message, "pi finished: workspace 1");
+                assert_eq!(message, "pi finished");
+                assert_eq!(body.as_deref(), Some("workspace 1"));
             }
             other => panic!("expected toast notify, got {other:?}"),
         }
@@ -6182,14 +6956,519 @@ next_tab = ""
                 .recv_timeout(Duration::from_millis(100))
                 .expect("system toast message"),
         ) {
-            ServerMessage::Notify { kind, message } => {
+            ServerMessage::Notify {
+                kind,
+                message,
+                body,
+            } => {
                 assert_eq!(kind, protocol::NotifyKind::SystemToast);
+                assert_eq!(message, "v9.9.9 available");
                 assert_eq!(
-                    message,
-                    "v9.9.9 available: detach, run `herdr update`, then follow its restart guidance"
+                    body.as_deref(),
+                    Some("detach, run `herdr update`, then follow its restart guidance")
                 );
             }
             other => panic!("expected system toast notify, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn notification_show_api_forwards_system_notification_to_foreground_client() {
+        let mut server = test_headless_server();
+        let (client_tx, client_control_rx, _client_rx) = test_client_writer();
+
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.app.state.toast_config.delivery = crate::config::ToastDelivery::System;
+
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        let changed = server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+            request: api::schema::Request {
+                id: "notify".into(),
+                method: api::schema::Method::NotificationShow(
+                    api::schema::NotificationShowParams {
+                        title: "build failed".into(),
+                        body: Some("api workspace".into()),
+                        position: Some(crate::config::ToastHerdrPosition::TopLeft),
+                        sound: api::schema::NotificationShowSound::Request,
+                    },
+                ),
+            },
+            respond_to,
+        });
+
+        assert!(changed);
+        let response = response_rx
+            .recv_timeout(Duration::from_millis(100))
+            .unwrap();
+        let parsed: api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            parsed.result,
+            api::schema::ResponseResult::NotificationShow {
+                shown: true,
+                reason: api::schema::NotificationShowReason::Shown,
+            }
+        );
+        let first = read_server_message(
+            client_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("api notification message"),
+        );
+        let second = read_server_message(
+            client_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("api sound message"),
+        );
+
+        match first {
+            ServerMessage::Notify {
+                kind,
+                message,
+                body,
+            } => {
+                assert_eq!(kind, protocol::NotifyKind::SystemToast);
+                assert_eq!(message, "build failed");
+                assert_eq!(body.as_deref(), Some("api workspace"));
+            }
+            other => panic!("expected api notification, got {other:?}"),
+        }
+        match second {
+            ServerMessage::Notify {
+                kind,
+                message,
+                body,
+            } => {
+                assert_eq!(kind, protocol::NotifyKind::Sound);
+                assert_eq!(message, "agent attention");
+                assert!(body.is_none());
+            }
+            other => panic!("expected api sound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn notification_show_api_preserves_colon_in_forwarded_title() {
+        let mut server = test_headless_server();
+        let (client_tx, client_control_rx, _client_rx) = test_client_writer();
+
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.app.state.toast_config.delivery = crate::config::ToastDelivery::System;
+
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        let changed = server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+            request: api::schema::Request {
+                id: "notify".into(),
+                method: api::schema::Method::NotificationShow(
+                    api::schema::NotificationShowParams {
+                        title: "build: failed".into(),
+                        body: Some("api workspace".into()),
+                        position: None,
+                        sound: api::schema::NotificationShowSound::None,
+                    },
+                ),
+            },
+            respond_to,
+        });
+
+        assert!(changed);
+        let response = response_rx
+            .recv_timeout(Duration::from_millis(100))
+            .unwrap();
+        let parsed: api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            parsed.result,
+            api::schema::ResponseResult::NotificationShow {
+                shown: true,
+                reason: api::schema::NotificationShowReason::Shown,
+            }
+        );
+        match read_server_message(
+            client_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("api notification message"),
+        ) {
+            ServerMessage::Notify {
+                kind,
+                message,
+                body,
+            } => {
+                assert_eq!(kind, protocol::NotifyKind::SystemToast);
+                assert_eq!(message, "build: failed");
+                assert_eq!(body.as_deref(), Some("api workspace"));
+            }
+            other => panic!("expected api notification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn notification_show_api_validates_empty_title_before_disabled_delivery() {
+        let mut server = test_headless_server();
+        server.app.state.toast_config.delivery = crate::config::ToastDelivery::Off;
+
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        let changed = server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+            request: api::schema::Request {
+                id: "notify".into(),
+                method: api::schema::Method::NotificationShow(
+                    api::schema::NotificationShowParams {
+                        title: "\n\t".into(),
+                        body: None,
+                        position: None,
+                        sound: api::schema::NotificationShowSound::None,
+                    },
+                ),
+            },
+            respond_to,
+        });
+
+        assert!(changed);
+        let response = response_rx
+            .recv_timeout(Duration::from_millis(100))
+            .unwrap();
+        let parsed: api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(parsed.error.code, "invalid_params");
+        assert_eq!(parsed.error.message, "notification title is empty");
+    }
+
+    #[test]
+    fn notification_show_api_reports_no_foreground_client() {
+        let mut server = test_headless_server();
+        server.foreground_client_id = None;
+        server.app.state.toast_config.delivery = crate::config::ToastDelivery::System;
+
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        let changed = server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+            request: api::schema::Request {
+                id: "notify".into(),
+                method: api::schema::Method::NotificationShow(
+                    api::schema::NotificationShowParams {
+                        title: "build failed".into(),
+                        body: None,
+                        position: None,
+                        sound: api::schema::NotificationShowSound::Request,
+                    },
+                ),
+            },
+            respond_to,
+        });
+
+        assert!(changed);
+        let response = response_rx
+            .recv_timeout(Duration::from_millis(100))
+            .unwrap();
+        let parsed: api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            parsed.result,
+            api::schema::ResponseResult::NotificationShow {
+                shown: false,
+                reason: api::schema::NotificationShowReason::NoForegroundClient,
+            }
+        );
+    }
+
+    #[test]
+    fn notification_show_api_herdr_toast_expires_headless() {
+        let mut server = test_headless_server();
+        server.app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        assert!(
+            server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                request: api::schema::Request {
+                    id: "notify".into(),
+                    method: api::schema::Method::NotificationShow(
+                        api::schema::NotificationShowParams {
+                            title: "build failed".into(),
+                            body: None,
+                            position: None,
+                            sound: api::schema::NotificationShowSound::None,
+                        },
+                    ),
+                },
+                respond_to,
+            })
+        );
+
+        let response = response_rx
+            .recv_timeout(Duration::from_millis(100))
+            .unwrap();
+        let parsed: api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            parsed.result,
+            api::schema::ResponseResult::NotificationShow {
+                shown: true,
+                reason: api::schema::NotificationShowReason::Shown,
+            }
+        );
+        let deadline = server.app.toast_deadline.expect("api toast deadline");
+        assert!(server.handle_scheduled_tasks_headless(deadline, false));
+        assert!(server.app.state.toast.is_none());
+        assert!(server.app.toast_deadline.is_none());
+    }
+
+    #[test]
+    fn notification_show_api_forwards_sound_for_herdr_delivery() {
+        let mut server = test_headless_server();
+        let (client_tx, client_control_rx, _client_rx) = test_client_writer();
+
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        assert!(
+            server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+                request: api::schema::Request {
+                    id: "notify".into(),
+                    method: api::schema::Method::NotificationShow(
+                        api::schema::NotificationShowParams {
+                            title: "build failed".into(),
+                            body: None,
+                            position: None,
+                            sound: api::schema::NotificationShowSound::Done,
+                        },
+                    ),
+                },
+                respond_to,
+            })
+        );
+
+        let response = response_rx
+            .recv_timeout(Duration::from_millis(100))
+            .unwrap();
+        let parsed: api::schema::SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            parsed.result,
+            api::schema::ResponseResult::NotificationShow {
+                shown: true,
+                reason: api::schema::NotificationShowReason::Shown,
+            }
+        );
+        match read_server_message(
+            client_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("api sound message"),
+        ) {
+            ServerMessage::Notify {
+                kind,
+                message,
+                body,
+            } => {
+                assert_eq!(kind, protocol::NotifyKind::Sound);
+                assert_eq!(message, "agent done");
+                assert!(body.is_none());
+            }
+            other => panic!("expected api sound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delayed_agent_notification_forwards_after_deadline() {
+        let mut server = test_headless_server();
+        let background = crate::workspace::Workspace::test_new("background");
+        let pane_id = background.tabs[0].root_pane;
+        let foreground = crate::workspace::Workspace::test_new("foreground");
+        server.app.state.workspaces = vec![background, foreground];
+        server.app.state.ensure_test_terminals();
+        server.app.state.active = Some(1);
+        server.app.state.selected = 1;
+        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.toast_config.delivery = crate::config::ToastDelivery::System;
+        server.app.state.toast_config.delay_seconds = 1;
+
+        let (client_tx, client_control_rx, _client_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                None,
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        let changed = server.handle_internal_event_with_forwarding(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(crate::detect::Agent::Pi),
+            state: crate::detect::AgentState::Blocked,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: Instant::now(),
+        });
+
+        assert!(changed);
+        assert!(server.app.state.toast.is_none());
+        assert!(
+            client_control_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "delayed transition should not notify immediately"
+        );
+
+        let deadline = server
+            .app
+            .state
+            .next_pending_agent_notification_deadline()
+            .expect("pending notification deadline");
+        assert!(server.handle_scheduled_tasks_headless(deadline, false));
+
+        let first = read_server_message(
+            client_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("delayed sound message"),
+        );
+        let second = read_server_message(
+            client_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("delayed toast message"),
+        );
+
+        assert!(matches!(
+            first,
+            ServerMessage::Notify {
+                kind: protocol::NotifyKind::Sound,
+                ..
+            }
+        ));
+        match second {
+            ServerMessage::Notify {
+                kind,
+                message,
+                body,
+            } => {
+                assert_eq!(kind, protocol::NotifyKind::SystemToast);
+                assert_eq!(message, "pi needs attention");
+                assert_eq!(body.as_deref(), Some("background · 1"));
+            }
+            other => panic!("expected delayed system toast, got {other:?}"),
+        }
+        assert!(server.app.state.pending_agent_notifications.is_empty());
+    }
+
+    #[test]
+    fn delayed_active_tab_unfocused_agent_notification_forwards_after_deadline() {
+        let mut server = test_headless_server();
+        let workspace = crate::workspace::Workspace::test_new("active");
+        let pane_id = workspace.tabs[0].root_pane;
+        server.app.state.workspaces = vec![workspace];
+        server.app.state.ensure_test_terminals();
+        server.app.state.active = Some(0);
+        server.app.state.selected = 0;
+        server.app.state.mode = crate::app::Mode::Terminal;
+        server.app.state.toast_config.delivery = crate::config::ToastDelivery::System;
+        server.app.state.toast_config.delay_seconds = 1;
+
+        let (client_tx, client_control_rx, _client_rx) = test_client_writer();
+        server.clients.insert(
+            1,
+            ClientConnection::new(
+                (80, 24),
+                crate::kitty_graphics::HostCellSize::default(),
+                crate::terminal_theme::TerminalTheme::default(),
+                Some(false),
+                1,
+                RenderEncoding::SemanticFrame,
+                Some(client_tx),
+            ),
+        );
+        server.foreground_client_id = Some(1);
+        server.sync_foreground_client_state();
+
+        assert!(
+            server.handle_internal_event_with_forwarding(AppEvent::StateChanged {
+                pane_id,
+                agent: Some(crate::detect::Agent::Pi),
+                state: crate::detect::AgentState::Blocked,
+                visible_blocker: false,
+                visible_working: false,
+                process_exited: false,
+                observed_at: Instant::now(),
+            })
+        );
+        assert!(server.app.state.toast.is_none());
+        assert!(
+            client_control_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "delayed transition should not notify immediately"
+        );
+
+        let deadline = server
+            .app
+            .state
+            .next_pending_agent_notification_deadline()
+            .expect("pending notification deadline");
+        assert!(server.handle_scheduled_tasks_headless(deadline, false));
+
+        let first = read_server_message(
+            client_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("delayed sound message"),
+        );
+        let second = read_server_message(
+            client_control_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("delayed toast message"),
+        );
+
+        assert!(matches!(
+            first,
+            ServerMessage::Notify {
+                kind: protocol::NotifyKind::Sound,
+                ..
+            }
+        ));
+        match second {
+            ServerMessage::Notify {
+                kind,
+                message,
+                body,
+            } => {
+                assert_eq!(kind, protocol::NotifyKind::SystemToast);
+                assert_eq!(message, "pi needs attention");
+                assert_eq!(body.as_deref(), Some("active · 1"));
+            }
+            other => panic!("expected delayed system toast, got {other:?}"),
         }
     }
 

@@ -68,6 +68,8 @@ or install with mise:
 mise use -g herdr
 ```
 
+if mise reports `herdr not found in mise tool registry`, update mise and retry. older mise versions predate the herdr registry entry; `mise use -g github:ogulcancelik/herdr` works as a temporary fallback.
+
 or download the binary from [releases](https://github.com/ogulcancelik/herdr/releases). requires linux or macos.
 
 ## quick start

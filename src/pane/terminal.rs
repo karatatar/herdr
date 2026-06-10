@@ -23,7 +23,7 @@ use super::{
     osc::{
         contains_scrollback_clear_sequence, current_transient_default_color_owner,
         maybe_filter_primary_screen_scrollback_clear, restore_host_terminal_theme_if_needed,
-        write_host_terminal_theme, DefaultColorEvent, DefaultColorEventTracker,
+        write_host_terminal_theme, CwdOscTracker, DefaultColorEvent, DefaultColorEventTracker,
         DefaultColorOscTracker, DefaultColorQuery, DefaultColorTrackedEvent, Osc52Forwarder,
     },
     xtgettcap::{XtgettcapQueryTracker, XtgettcapResponse},
@@ -101,6 +101,7 @@ pub(crate) struct ProcessBytesResult {
     pub request_render: bool,
     pub render_delay: Option<Duration>,
     pub clipboard_writes: Vec<Vec<u8>>,
+    pub reported_cwd: Option<std::path::PathBuf>,
     pub terminal_responses: Vec<Bytes>,
 }
 
@@ -123,6 +124,7 @@ pub(crate) struct GhosttyPaneCore {
     pub child_default_foreground_changed: bool,
     pub child_default_background_changed: bool,
     pub osc52_forwarder: Osc52Forwarder,
+    pub cwd_osc_tracker: CwdOscTracker,
     pub xtgettcap_query_tracker: XtgettcapQueryTracker,
 }
 
@@ -181,8 +183,16 @@ impl PaneTerminal {
         self.ghostty.input_state()
     }
 
+    pub fn wheel_routing(&self) -> Option<crate::pane::WheelRouting> {
+        self.ghostty.wheel_routing()
+    }
+
     pub fn cursor_state(&self) -> Option<TerminalCursorState> {
         self.ghostty.cursor_state()
+    }
+
+    pub fn synchronized_output_active(&self) -> bool {
+        self.ghostty.synchronized_output_active()
     }
 
     pub fn visible_text(&self) -> String {
@@ -264,6 +274,7 @@ impl PaneTerminal {
         self.ghostty.keyboard_protocol().unwrap_or(fallback)
     }
 
+    #[cfg(unix)]
     pub fn kitty_keyboard_state_ansi(&self) -> Option<String> {
         self.ghostty
             .kitty_keyboard_state_ansi()
@@ -352,6 +363,7 @@ impl GhosttyPaneTerminal {
                 child_default_foreground_changed: false,
                 child_default_background_changed: false,
                 osc52_forwarder: Osc52Forwarder::default(),
+                cwd_osc_tracker: CwdOscTracker::default(),
                 xtgettcap_query_tracker: XtgettcapQueryTracker::default(),
             }),
             key_encoder: Mutex::new(key_encoder),
@@ -419,6 +431,7 @@ impl GhosttyPaneTerminal {
                 request_render: false,
                 render_delay: None,
                 clipboard_writes: Vec::new(),
+                reported_cwd: None,
                 terminal_responses: Vec::new(),
             };
         };
@@ -436,6 +449,8 @@ impl GhosttyPaneTerminal {
 
         core.osc52_forwarder.observe(bytes);
         let clipboard_writes = core.osc52_forwarder.drain_pending();
+        core.cwd_osc_tracker.observe(bytes);
+        let reported_cwd = core.cwd_osc_tracker.drain_latest();
 
         let alternate_screen = core
             .terminal
@@ -507,6 +522,7 @@ impl GhosttyPaneTerminal {
             request_render,
             render_delay,
             clipboard_writes,
+            reported_cwd,
             terminal_responses,
         }
     }
@@ -576,6 +592,7 @@ impl GhosttyPaneTerminal {
         }
     }
 
+    #[cfg(unix)]
     pub fn seed_handoff_input_state(&self, input_state: InputState) {
         let Ok(mut core) = self.core.lock() else {
             return;
@@ -647,6 +664,7 @@ impl GhosttyPaneTerminal {
         }
     }
 
+    #[cfg(unix)]
     pub fn seed_keyboard_protocol_flags(&self, flags: u16) {
         if flags == 0 {
             return;
@@ -654,6 +672,7 @@ impl GhosttyPaneTerminal {
         self.seed_keyboard_protocol_ansi(&format!("\x1b[>{flags}u"));
     }
 
+    #[cfg(unix)]
     pub fn seed_keyboard_protocol_ansi(&self, ansi: &str) {
         if ansi.is_empty() {
             return;
@@ -785,6 +804,7 @@ impl GhosttyPaneTerminal {
         ))
     }
 
+    #[cfg(unix)]
     pub fn kitty_keyboard_state_ansi(&self) -> Option<String> {
         let core = self.core.lock().ok()?;
         core.kitty_keyboard.replay_ansi()
@@ -854,6 +874,29 @@ impl GhosttyPaneTerminal {
         })
     }
 
+    pub fn wheel_routing(&self) -> Option<crate::pane::WheelRouting> {
+        let Ok(core) = self.core.lock() else {
+            return None;
+        };
+        let alternate_screen =
+            core.terminal.active_screen().ok()? == crate::ghostty::ActiveScreen::Alternate;
+        let mouse_alternate_scroll = core
+            .terminal
+            .mode_get(crate::ghostty::MODE_MOUSE_ALTERNATE_SCROLL)
+            .ok()?;
+        let mouse_reporting = core.terminal.mode_get(MODE_MOUSE_ANY_MOTION).ok()?
+            || core.terminal.mode_get(MODE_MOUSE_BUTTON_MOTION).ok()?
+            || core.terminal.mode_get(MODE_MOUSE_PRESS_RELEASE).ok()?
+            || core.terminal.mode_get(MODE_MOUSE_X10).ok()?;
+        Some(if mouse_reporting {
+            crate::pane::WheelRouting::MouseReport
+        } else if alternate_screen && mouse_alternate_scroll {
+            crate::pane::WheelRouting::AlternateScroll
+        } else {
+            crate::pane::WheelRouting::HostScroll
+        })
+    }
+
     pub fn cursor_state(&self) -> Option<TerminalCursorState> {
         let mut core = self.core.lock().ok()?;
         let GhosttyPaneCore {
@@ -875,6 +918,18 @@ impl GhosttyPaneTerminal {
             visible: render_state.cursor_visible().ok()?,
             shape,
         })
+    }
+
+    pub fn synchronized_output_active(&self) -> bool {
+        self.core
+            .lock()
+            .ok()
+            .and_then(|core| {
+                core.terminal
+                    .mode_get(crate::ghostty::MODE_SYNCHRONIZED_OUTPUT)
+                    .ok()
+            })
+            .unwrap_or(false)
     }
 
     pub fn encode_terminal_key(
@@ -911,7 +966,10 @@ impl GhosttyPaneTerminal {
         };
         let mut encoder = ghostty_mouse_encoder_for_terminal(&core.terminal)?;
         let event = ghostty_mouse_event_from_button_kind(kind, column, row, modifiers)?;
-        encoder.encode(&event).ok()
+        encoder
+            .encode(&event)
+            .ok()
+            .filter(|bytes| !bytes.is_empty())
     }
 
     pub fn encode_mouse_motion(
@@ -929,7 +987,10 @@ impl GhosttyPaneTerminal {
         }
         let mut encoder = ghostty_mouse_encoder_for_terminal(&core.terminal)?;
         let event = ghostty_mouse_event_from_motion_kind(kind, column, row, modifiers)?;
-        encoder.encode(&event).ok()
+        encoder
+            .encode(&event)
+            .ok()
+            .filter(|bytes| !bytes.is_empty())
     }
 
     pub fn encode_mouse_wheel(
@@ -944,7 +1005,10 @@ impl GhosttyPaneTerminal {
         };
         let mut encoder = ghostty_mouse_encoder_for_terminal(&core.terminal)?;
         let event = ghostty_mouse_event_from_wheel_kind(kind, column, row, modifiers)?;
-        encoder.encode(&event).ok()
+        encoder
+            .encode(&event)
+            .ok()
+            .filter(|bytes| !bytes.is_empty())
     }
 
     pub fn visible_text(&self) -> String {
@@ -2144,6 +2208,7 @@ mod tests {
         assert_eq!(encoded, b"\x1bOA");
     }
 
+    #[cfg(unix)]
     #[test]
     fn ghostty_seed_handoff_input_state_restores_input_modes() {
         let (tx, _rx) = mpsc::channel(4);
@@ -2254,6 +2319,7 @@ mod tests {
         assert_eq!(encoded, b"\x1b[13;2u");
     }
 
+    #[cfg(unix)]
     #[test]
     fn ghostty_seed_keyboard_protocol_flags_restores_shift_enter_encoding() {
         let (tx, _rx) = mpsc::channel(4);
@@ -2271,6 +2337,7 @@ mod tests {
         assert_eq!(encoded, b"\x1b[13;2u");
     }
 
+    #[cfg(unix)]
     #[test]
     fn ghostty_keyboard_protocol_state_replays_nested_stack() {
         let (tx, _rx) = mpsc::channel(4);
@@ -2393,6 +2460,23 @@ mod tests {
         );
 
         assert_eq!(encoded.as_deref(), Some(&b"\x1b[<36;5;7M"[..]));
+    }
+
+    #[test]
+    fn ghostty_mouse_drag_without_motion_reporting_is_not_forwarded() {
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        terminal.write(b"\x1b[?1000h\x1b[?1006h");
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        let encoded = pane.encode_mouse_button(
+            crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            4,
+            6,
+            crossterm::event::KeyModifiers::empty(),
+        );
+
+        assert_eq!(encoded, None);
     }
 
     #[test]

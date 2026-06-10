@@ -352,7 +352,7 @@ impl TerminalState {
 
     fn effective_custom_status_for_state_at_with_ttl(
         &self,
-        state: AgentState,
+        _state: AgentState,
         now: Instant,
         enforce_ttl: bool,
     ) -> Option<String> {
@@ -360,10 +360,7 @@ impl TerminalState {
             return Some(custom_status);
         }
 
-        if self.visible_blocker_overrides_hook()
-            || self.visible_working_overrides_hook()
-            || self.visible_idle_masks_hook_custom_status(state, now)
-        {
+        if self.visible_blocker_overrides_hook() {
             return None;
         }
 

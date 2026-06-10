@@ -134,6 +134,23 @@ fn parse_legacy_special_sequence(data: &str) -> Option<TerminalKey> {
         "\x1b[6~" => Some(TerminalKey::new(KeyCode::PageDown, KeyModifiers::empty())),
         "\x1b[2~" => Some(TerminalKey::new(KeyCode::Insert, KeyModifiers::empty())),
         "\x1b[3~" => Some(TerminalKey::new(KeyCode::Delete, KeyModifiers::empty())),
+        "\x1bOp" => Some(TerminalKey::new(KeyCode::Char('0'), KeyModifiers::empty())),
+        "\x1bOq" => Some(TerminalKey::new(KeyCode::Char('1'), KeyModifiers::empty())),
+        "\x1bOr" => Some(TerminalKey::new(KeyCode::Char('2'), KeyModifiers::empty())),
+        "\x1bOs" => Some(TerminalKey::new(KeyCode::Char('3'), KeyModifiers::empty())),
+        "\x1bOt" => Some(TerminalKey::new(KeyCode::Char('4'), KeyModifiers::empty())),
+        "\x1bOu" => Some(TerminalKey::new(KeyCode::Char('5'), KeyModifiers::empty())),
+        "\x1bOv" => Some(TerminalKey::new(KeyCode::Char('6'), KeyModifiers::empty())),
+        "\x1bOw" => Some(TerminalKey::new(KeyCode::Char('7'), KeyModifiers::empty())),
+        "\x1bOx" => Some(TerminalKey::new(KeyCode::Char('8'), KeyModifiers::empty())),
+        "\x1bOy" => Some(TerminalKey::new(KeyCode::Char('9'), KeyModifiers::empty())),
+        "\x1bOn" => Some(TerminalKey::new(KeyCode::Char('.'), KeyModifiers::empty())),
+        "\x1bOl" => Some(TerminalKey::new(KeyCode::Char(','), KeyModifiers::empty())),
+        "\x1bOm" => Some(TerminalKey::new(KeyCode::Char('-'), KeyModifiers::empty())),
+        "\x1bOk" => Some(TerminalKey::new(KeyCode::Char('+'), KeyModifiers::empty())),
+        "\x1bOj" => Some(TerminalKey::new(KeyCode::Char('*'), KeyModifiers::empty())),
+        "\x1bOo" => Some(TerminalKey::new(KeyCode::Char('/'), KeyModifiers::empty())),
+        "\x1bOM" => Some(TerminalKey::new(KeyCode::Enter, KeyModifiers::empty())),
         "\x1bOP" => Some(TerminalKey::new(KeyCode::F(1), KeyModifiers::empty())),
         "\x1bOQ" => Some(TerminalKey::new(KeyCode::F(2), KeyModifiers::empty())),
         "\x1bOR" => Some(TerminalKey::new(KeyCode::F(3), KeyModifiers::empty())),
@@ -404,6 +421,44 @@ mod tests {
             crossterm::event::KeyEventKind::Press,
             None,
         );
+    }
+
+    #[test]
+    fn parse_legacy_application_keypad_sequences() {
+        let cases = [
+            ("\x1bOp", KeyCode::Char('0')),
+            ("\x1bOq", KeyCode::Char('1')),
+            ("\x1bOr", KeyCode::Char('2')),
+            ("\x1bOs", KeyCode::Char('3')),
+            ("\x1bOt", KeyCode::Char('4')),
+            ("\x1bOu", KeyCode::Char('5')),
+            ("\x1bOv", KeyCode::Char('6')),
+            ("\x1bOw", KeyCode::Char('7')),
+            ("\x1bOx", KeyCode::Char('8')),
+            ("\x1bOy", KeyCode::Char('9')),
+            ("\x1bOn", KeyCode::Char('.')),
+            ("\x1bOl", KeyCode::Char(',')),
+            ("\x1bOm", KeyCode::Char('-')),
+            ("\x1bOk", KeyCode::Char('+')),
+            ("\x1bOj", KeyCode::Char('*')),
+            ("\x1bOo", KeyCode::Char('/')),
+            ("\x1bOM", KeyCode::Enter),
+        ];
+
+        for (sequence, code) in cases {
+            assert_terminal_key_eq(
+                parse_terminal_key_sequence(sequence).expect("keypad sequence should parse"),
+                code,
+                KeyModifiers::empty(),
+                crossterm::event::KeyEventKind::Press,
+                None,
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_legacy_ss3_sequence_remains_unsupported() {
+        assert!(parse_terminal_key_sequence("\x1bOz").is_none());
     }
 
     #[test]

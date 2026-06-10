@@ -12,18 +12,11 @@ use super::super::{has_confirmation_prompt, has_selection_prompt, AgentState};
 pub(super) fn detect(content: &str) -> AgentState {
     let lower = content.to_lowercase();
 
-    // Search prompt is always idle
-    if content.contains("⌕ Search…") {
-        return AgentState::Idle;
-    }
-
-    // ctrl+r toggle — don't change state
-    // (we return Idle as a safe default since we don't have previous state here)
-    if lower.contains("ctrl+r to toggle") {
-        return AgentState::Idle;
-    }
-
     if has_live_blocked_form(content) {
+        return AgentState::Blocked;
+    }
+
+    if has_dynamic_workflow_prompt(&lower) {
         return AgentState::Blocked;
     }
 
@@ -35,16 +28,17 @@ pub(super) fn detect(content: &str) -> AgentState {
         return AgentState::Blocked;
     }
 
-    if has_prompt_box(content) {
-        return AgentState::Idle;
-    }
-
     AgentState::Idle
 }
 
 pub(super) fn has_visible_blocker(content: &str) -> bool {
+    if has_live_input_prompt_box(content) {
+        return false;
+    }
+
     let lower = content.to_lowercase();
     has_live_blocked_form(content)
+        || has_dynamic_workflow_prompt(&lower)
         || lower.contains("do you want to proceed?")
             && has_claude_yes_no_choice(content)
             && (lower.contains("bash command")
@@ -52,6 +46,29 @@ pub(super) fn has_visible_blocker(content: &str) -> bool {
                 || lower.contains("contains expansion")
                 || lower.contains("tab to amend")
                 || lower.contains("ctrl+e to explain"))
+}
+
+pub(in crate::detect) fn has_idle_recap_notice(content: &str) -> bool {
+    if !has_prompt_box(content) || has_visible_blocker(content) {
+        return false;
+    }
+
+    let above_prompt = content_above_prompt_box(content);
+    let bottom_lines = bottom_non_empty_lines(above_prompt, 8);
+    let Some(last_line) = bottom_lines.last() else {
+        return false;
+    };
+    if !last_line
+        .to_ascii_lowercase()
+        .contains("(disable recaps in /config)")
+    {
+        return false;
+    }
+    let bottom = normalize_lines(&bottom_lines).to_ascii_lowercase();
+
+    bottom.contains("※ recap:")
+        && !bottom.contains("esc to interrupt")
+        && !bottom.contains("ctrl+c to interrupt")
 }
 
 pub(super) fn has_working_chrome(content: &str) -> bool {
@@ -78,15 +95,57 @@ pub(super) fn is_transcript_viewer(content: &str) -> bool {
 }
 
 pub(super) fn has_prompt_box(content: &str) -> bool {
-    let lines: Vec<&str> = content.lines().collect();
-    let Some(top_border_index) = claude_prompt_box_top_border_index(&lines) else {
-        return false;
-    };
+    prompt_box_body_lines(content)
+        .is_some_and(|lines| lines.iter().any(|line| line.trim_start().starts_with('❯')))
+}
 
-    lines[top_border_index + 1..]
-        .iter()
-        .take_while(|line| !is_horizontal_rule(line))
-        .any(|line| line.trim_start().starts_with('❯'))
+fn has_live_input_prompt_box(content: &str) -> bool {
+    prompt_box_body_lines(content).is_some_and(|lines| {
+        let non_empty: Vec<&str> = lines
+            .iter()
+            .map(|line| line.trim())
+            .filter(|line| !line.is_empty())
+            .collect();
+        let Some(first) = non_empty.first() else {
+            return false;
+        };
+        first.trim_start().starts_with('❯')
+            && !non_empty
+                .iter()
+                .any(|line| claude_prompt_box_line_is_selector_chrome(line))
+    })
+}
+
+fn claude_prompt_box_line_is_selector_chrome(line: &str) -> bool {
+    let trimmed = line.trim().trim_start_matches('❯').trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+
+    lower.contains("enter to select")
+        || lower.contains("enter to confirm")
+        || lower.contains("enter to submit")
+        || lower.contains("esc to cancel")
+        || lower.contains("tab/arrow")
+        || lower.contains("arrow keys")
+        || lower.contains("↑/↓")
+        || lower.contains("↑↓")
+        || lower.contains("ctrl+g to edit")
+        || lower.contains("ctrl+e to explain")
+        || trimmed
+            .split_once('.')
+            .is_some_and(|(prefix, _)| prefix.trim().parse::<u32>().is_ok())
+}
+
+fn prompt_box_body_lines(content: &str) -> Option<Vec<&str>> {
+    let lines: Vec<&str> = content.lines().collect();
+    let top_border_index = claude_prompt_box_top_border_index(&lines)?;
+
+    Some(
+        lines[top_border_index + 1..]
+            .iter()
+            .take_while(|line| !is_horizontal_rule(line))
+            .copied()
+            .collect(),
+    )
 }
 
 /// Claude uses the same generic Select and Dialog widgets for both
@@ -96,6 +155,7 @@ fn has_claude_blocked_prompt(content: &str, lower_content: &str) -> bool {
     has_confirmation_prompt(lower_content)
         || lower_content.contains("do you want to proceed?")
         || lower_content.contains("would you like to proceed?")
+        || has_dynamic_workflow_prompt(lower_content)
         || lower_content.contains("waiting for permission")
         || lower_content.contains("do you want to allow this connection?")
         || lower_content.contains("tab to amend")
@@ -103,6 +163,10 @@ fn has_claude_blocked_prompt(content: &str, lower_content: &str) -> bool {
         || lower_content.contains("review your answers")
         || lower_content.contains("skip interview and plan immediately")
         || (has_selection_prompt(content) && has_claude_yes_no_choice(content))
+}
+
+fn has_dynamic_workflow_prompt(lower_content: &str) -> bool {
+    lower_content.contains("run a dynamic workflow?") && lower_content.contains("esc to cancel")
 }
 
 fn has_live_blocked_form(content: &str) -> bool {

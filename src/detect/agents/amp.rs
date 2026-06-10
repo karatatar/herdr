@@ -17,6 +17,19 @@ use super::super::AgentState;
 pub(super) fn detect(content: &str) -> AgentState {
     let lower = content.to_lowercase();
 
+    if has_visible_blocker(content) {
+        return AgentState::Blocked;
+    }
+
+    if lower.contains("esc to cancel") {
+        return AgentState::Working;
+    }
+
+    AgentState::Idle
+}
+
+pub(super) fn has_visible_blocker(content: &str) -> bool {
+    let lower = content.to_lowercase();
     let has_waiting_for_approval = lower.contains("waiting for approval");
     let has_approval_header = lower.contains("invoke tool")
         || lower.contains("run this command?")
@@ -29,13 +42,5 @@ pub(super) fn detect(content: &str) -> AgentState {
             || lower.contains("allow file for every session")
             || lower.contains("deny with feedback"));
 
-    if has_approval_actions && (has_waiting_for_approval || has_approval_header) {
-        return AgentState::Blocked;
-    }
-
-    if lower.contains("esc to cancel") {
-        return AgentState::Working;
-    }
-
-    AgentState::Idle
+    has_approval_actions && (has_waiting_for_approval || has_approval_header)
 }

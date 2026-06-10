@@ -187,6 +187,15 @@ pub fn write_clipboard(bytes: &[u8]) -> bool {
     false
 }
 
+pub fn read_clipboard_text() -> Option<String> {
+    for command in read_clipboard_text_commands() {
+        if let Some(text) = read_clipboard_text_with_command(&command) {
+            return Some(text);
+        }
+    }
+    None
+}
+
 pub fn open_url(url: &str) -> std::io::Result<()> {
     Command::new("xdg-open")
         .arg(url)
@@ -207,22 +216,54 @@ pub fn read_clipboard_image() -> Option<ClipboardImage> {
         ("image/bmp", "bmp"),
     ] {
         if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-            if let Some(bytes) = read_clipboard_image_with_command("wl-paste", &["--type", mime]) {
-                return Some(ClipboardImage { bytes, extension });
+            if let Some(image) =
+                read_validated_clipboard_image("wl-paste", &["--type", mime], extension)
+            {
+                return Some(image);
             }
         }
 
         if std::env::var_os("DISPLAY").is_some() {
-            if let Some(bytes) = read_clipboard_image_with_command(
+            if let Some(image) = read_validated_clipboard_image(
                 "xclip",
                 &["-selection", "clipboard", "-t", mime, "-o"],
+                extension,
             ) {
-                return Some(ClipboardImage { bytes, extension });
+                return Some(image);
             }
         }
     }
 
     None
+}
+
+fn read_validated_clipboard_image(
+    program: &str,
+    args: &[&str],
+    extension: &'static str,
+) -> Option<ClipboardImage> {
+    let bytes = read_clipboard_image_with_command(program, args)?;
+    if !bytes_match_image_signature(extension, &bytes) {
+        return None;
+    }
+    Some(ClipboardImage { bytes, extension })
+}
+
+fn bytes_match_image_signature(extension: &str, bytes: &[u8]) -> bool {
+    match extension {
+        "png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "jpg" => bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
+        "gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
+        "webp" => bytes.len() >= 12 && bytes.starts_with(b"RIFF") && bytes[8..12] == *b"WEBP",
+        "bmp" => {
+            if bytes.len() < 26 || !bytes.starts_with(b"BM") {
+                return false;
+            }
+            let offset = u32::from_le_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]) as usize;
+            (26..=bytes.len()).contains(&offset)
+        }
+        _ => false,
+    }
 }
 
 /// Show a native desktop notification through libnotify's command-line helper.
@@ -337,6 +378,72 @@ fn clipboard_commands() -> Vec<ClipboardCommand> {
     commands
 }
 
+fn read_clipboard_text_commands() -> Vec<ClipboardCommand> {
+    let mut commands = Vec::new();
+
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        commands.push(ClipboardCommand {
+            program: "wl-paste",
+            args: &["--type", "text/plain;charset=utf-8"],
+        });
+        commands.push(ClipboardCommand {
+            program: "wl-paste",
+            args: &["--type", "text/plain"],
+        });
+    }
+
+    if std::env::var_os("DISPLAY").is_some() {
+        commands.push(ClipboardCommand {
+            program: "xclip",
+            args: &["-selection", "clipboard", "-out"],
+        });
+        commands.push(ClipboardCommand {
+            program: "xsel",
+            args: &["--clipboard", "--output"],
+        });
+    }
+
+    commands
+}
+
+fn read_clipboard_text_with_command(command: &ClipboardCommand) -> Option<String> {
+    const MAX_CLIPBOARD_TEXT_BYTES: usize = 1024 * 1024;
+
+    let mut child = Command::new(command.program)
+        .args(command.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let stdout = child.stdout.take()?;
+    let read = match read_limited_reader(stdout, MAX_CLIPBOARD_TEXT_BYTES) {
+        Ok(LimitedRead::Oversized) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        Ok(read) => read,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+    };
+
+    let status = child.wait().ok()?;
+    if !status.success() {
+        return None;
+    }
+
+    match read {
+        LimitedRead::Complete(bytes) => String::from_utf8(bytes).ok(),
+        LimitedRead::Empty => None,
+        LimitedRead::Oversized => unreachable!("oversized clipboard text is handled before wait"),
+    }
+}
+
 fn run_clipboard_command(command: &ClipboardCommand, bytes: &[u8]) -> bool {
     let mut child = match Command::new(command.program)
         .args(command.args)
@@ -408,6 +515,44 @@ mod tests {
     }
 
     #[test]
+    fn read_clipboard_text_commands_include_session_backends() {
+        let _guard = env_lock().lock().unwrap();
+        unsafe {
+            std::env::set_var("WAYLAND_DISPLAY", "wayland-0");
+            std::env::set_var("DISPLAY", ":0");
+        }
+
+        let commands = read_clipboard_text_commands();
+        assert_eq!(commands[0].program, "wl-paste");
+        assert_eq!(commands[1].program, "wl-paste");
+        assert_eq!(commands[2].program, "xclip");
+        assert_eq!(commands[3].program, "xsel");
+    }
+
+    #[test]
+    fn read_clipboard_text_with_command_reads_utf8() {
+        let command = ClipboardCommand {
+            program: "printf",
+            args: &["feature/linear-302"],
+        };
+
+        assert_eq!(
+            read_clipboard_text_with_command(&command).as_deref(),
+            Some("feature/linear-302")
+        );
+    }
+
+    #[test]
+    fn read_clipboard_text_with_command_rejects_oversized_output() {
+        let command = ClipboardCommand {
+            program: "sh",
+            args: &["-c", "yes x | head -c 1048578"],
+        };
+
+        assert_eq!(read_clipboard_text_with_command(&command), None);
+    }
+
+    #[test]
     fn read_clipboard_image_with_spawned_command_reads_under_limit() {
         let mut command = Command::new("sh");
         command.arg("-c").arg("printf image");
@@ -427,6 +572,162 @@ mod tests {
             read_clipboard_image_with_spawned_command_max(command, 4),
             None
         );
+    }
+
+    #[test]
+    fn read_clipboard_image_rejects_xclip_text_served_for_image_target() {
+        let _guard = env_lock().lock().unwrap();
+        let temp_dir =
+            std::env::temp_dir().join(format!("herdr-fake-xclip-{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).expect("temp dir should be created");
+        let fake_xclip = temp_dir.join("xclip");
+        std::fs::write(&fake_xclip, "#!/bin/sh\nprintf '# Tasks'\n")
+            .expect("fake xclip should be written");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = std::fs::metadata(&fake_xclip)
+                .expect("fake xclip metadata")
+                .permissions();
+            permissions.set_mode(0o700);
+            std::fs::set_permissions(&fake_xclip, permissions)
+                .expect("fake xclip should be executable");
+        }
+
+        let old_path = std::env::var_os("PATH");
+        let test_path = match old_path.as_ref() {
+            Some(path) => {
+                let mut paths = vec![temp_dir.clone()];
+                paths.extend(std::env::split_paths(path));
+                std::env::join_paths(paths).expect("test path should be valid")
+            }
+            None => temp_dir.clone().into_os_string(),
+        };
+
+        unsafe {
+            std::env::remove_var("WAYLAND_DISPLAY");
+            std::env::set_var("DISPLAY", ":0");
+            std::env::set_var("PATH", test_path);
+        }
+
+        let result = read_clipboard_image();
+
+        unsafe {
+            match old_path {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+        let _ = std::fs::remove_file(fake_xclip);
+        let _ = std::fs::remove_dir(temp_dir);
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn read_clipboard_image_rejects_wayland_xclip_fallback_text_for_image_target() {
+        let _guard = env_lock().lock().unwrap();
+        let temp_dir =
+            std::env::temp_dir().join(format!("herdr-fake-wayland-xclip-{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).expect("temp dir should be created");
+        let fake_wl_paste = temp_dir.join("wl-paste");
+        let fake_xclip = temp_dir.join("xclip");
+        std::fs::write(&fake_wl_paste, "#!/bin/sh\nexit 1\n")
+            .expect("fake wl-paste should be written");
+        std::fs::write(&fake_xclip, "#!/bin/sh\nprintf '# Tasks'\n")
+            .expect("fake xclip should be written");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            for command in [&fake_wl_paste, &fake_xclip] {
+                let mut permissions = std::fs::metadata(command)
+                    .expect("fake clipboard command metadata")
+                    .permissions();
+                permissions.set_mode(0o700);
+                std::fs::set_permissions(command, permissions)
+                    .expect("fake clipboard command should be executable");
+            }
+        }
+
+        let old_path = std::env::var_os("PATH");
+        let test_path = match old_path.as_ref() {
+            Some(path) => {
+                let mut paths = vec![temp_dir.clone()];
+                paths.extend(std::env::split_paths(path));
+                std::env::join_paths(paths).expect("test path should be valid")
+            }
+            None => temp_dir.clone().into_os_string(),
+        };
+
+        unsafe {
+            std::env::set_var("WAYLAND_DISPLAY", "wayland-0");
+            std::env::set_var("DISPLAY", ":0");
+            std::env::set_var("PATH", test_path);
+        }
+
+        let result = read_clipboard_image();
+
+        unsafe {
+            match old_path {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+        let _ = std::fs::remove_file(fake_wl_paste);
+        let _ = std::fs::remove_file(fake_xclip);
+        let _ = std::fs::remove_dir(temp_dir);
+
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn read_validated_clipboard_image_accepts_real_png_payload() {
+        assert_eq!(
+            read_validated_clipboard_image(
+                "sh",
+                &["-c", "printf '\\211PNG\\r\\n\\032\\nrest-of-image'"],
+                "png"
+            ),
+            Some(ClipboardImage {
+                bytes: b"\x89PNG\r\n\x1a\nrest-of-image".to_vec(),
+                extension: "png",
+            })
+        );
+    }
+
+    #[test]
+    fn image_signatures_match_only_their_format() {
+        assert!(bytes_match_image_signature("png", b"\x89PNG\r\n\x1a\n..."));
+        assert!(bytes_match_image_signature(
+            "jpg",
+            &[0xFF, 0xD8, 0xFF, 0xE0]
+        ));
+        assert!(bytes_match_image_signature("gif", b"GIF87a..."));
+        assert!(bytes_match_image_signature("gif", b"GIF89a..."));
+        assert!(bytes_match_image_signature(
+            "webp",
+            b"RIFF\x10\x00\x00\x00WEBPVP8 "
+        ));
+
+        let mut bmp = vec![0u8; 26];
+        bmp[..2].copy_from_slice(b"BM");
+        bmp[10] = 26;
+        assert!(bytes_match_image_signature("bmp", &bmp));
+
+        assert!(!bytes_match_image_signature("png", b"# Tasks"));
+        assert!(!bytes_match_image_signature("jpg", b"plain clipboard text"));
+        assert!(!bytes_match_image_signature("gif", b""));
+        assert!(!bytes_match_image_signature("webp", b"RIFF but not webp"));
+        assert!(!bytes_match_image_signature("bmp", b"\x89PNG\r\n\x1a\n"));
+        assert!(!bytes_match_image_signature(
+            "bmp",
+            b"BM text is not a bitmap"
+        ));
+        assert!(!bytes_match_image_signature("svg", b"<svg></svg>"));
     }
 
     #[test]

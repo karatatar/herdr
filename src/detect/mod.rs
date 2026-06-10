@@ -29,14 +29,16 @@ pub struct AgentDetection {
     /// human input. This is stronger than arbitrary prompt-like text in the
     /// scrollback and may override a non-blocked integration state.
     pub visible_blocker: bool,
-    /// True when the current screen visibly shows the agent's idle input UI.
-    /// This lets Herdr recover from integrations that miss an interrupt/stop
-    /// event without treating an empty or ambiguous screen as idle authority.
-    pub visible_idle: bool,
-    /// True when the current screen visibly shows live working chrome. This is
-    /// narrower than a fallback `Working` heuristic and may guard against stale
-    /// hook idle reports.
+    /// True when the current screen visibly shows live working chrome. PTY
+    /// activity is the normal working authority; this remains diagnostic
+    /// metadata and for non-PTY fallback paths.
     pub visible_working: bool,
+}
+
+/// A narrow screen-derived exception that can veto PTY activity as semantic work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentActivityVeto {
+    ClaudeIdleRecap,
 }
 
 /// Which agent we detected running in a pane.
@@ -178,11 +180,22 @@ pub fn detect_agent(agent: Option<Agent>, screen_content: &str) -> AgentDetectio
             state: AgentState::Unknown,
             skip_state_update: false,
             visible_blocker: false,
-            visible_idle: false,
             visible_working: false,
         };
     };
     agents::detect(agent, screen_content)
+}
+
+pub(crate) fn agent_activity_veto(
+    agent: Option<Agent>,
+    screen_content: &str,
+) -> Option<AgentActivityVeto> {
+    match agent {
+        Some(Agent::Claude) if agents::claude_code::has_idle_recap_notice(screen_content) => {
+            Some(AgentActivityVeto::ClaudeIdleRecap)
+        }
+        _ => None,
+    }
 }
 
 pub fn should_skip_state_update(agent: Option<Agent>, screen_content: &str) -> bool {
@@ -375,15 +388,94 @@ fn normalized_process_name(process: &crate::platform::ForegroundProcess) -> Stri
 
 fn wrapped_agent_name_from_runtime_argv(runtime: &str, argv: Option<&[String]>) -> Option<String> {
     let argv = argv?;
-    let runtime = path_basename(runtime).to_lowercase();
+    let runtime = normalized_agent_lookup_name(path_basename(runtime));
 
     match runtime.as_str() {
         "node" | "bun" => script_arg_agent_name(argv, &["-e", "--eval", "-p", "--print"], &[]),
         "python" | "python3" => script_arg_agent_name(argv, &["-c"], &["-m"]),
         "sh" | "bash" | "zsh" | "fish" => script_arg_agent_name(argv, &["-c"], &[]),
+        "cmd" => windows_cmd_arg_agent_name(argv),
+        "powershell" | "pwsh" => powershell_arg_agent_name(argv),
         "tmux" => None,
         _ => None,
     }
+}
+
+fn windows_cmd_arg_agent_name(argv: &[String]) -> Option<String> {
+    let mut args = argv.iter().skip(1);
+    while let Some(arg) = args.next() {
+        let flag = arg.trim_matches('"').to_lowercase();
+        match flag.as_str() {
+            "/c" | "/k" => {
+                return args
+                    .next()
+                    .and_then(|command| command_text_agent_name(command))
+            }
+            "/d" | "/s" | "/q" | "/a" | "/u" | "/e:on" | "/e:off" | "/f:on" | "/f:off"
+            | "/v:on" | "/v:off" => continue,
+            _ => {}
+        }
+    }
+    None
+}
+
+fn powershell_arg_agent_name(argv: &[String]) -> Option<String> {
+    let mut args = argv.iter().skip(1);
+    while let Some(arg) = args.next() {
+        let flag = arg.trim_matches('"').to_lowercase();
+        match flag.as_str() {
+            "-file" | "-f" | "/file" => {
+                return args
+                    .next()
+                    .and_then(|path| agent_name_from_path_token(path));
+            }
+            "-command" | "-c" | "/command" | "/c" => {
+                return args
+                    .next()
+                    .and_then(|command| command_text_agent_name(command));
+            }
+            "-encodedcommand" | "-enc" | "/encodedcommand" | "/enc" => return None,
+            "-configurationname" | "-executionpolicy" | "-outputformat" | "-psconsolefile"
+            | "-version" | "-windowstyle" | "-workingdirectory" => {
+                let _ = args.next();
+            }
+            _ if flag.starts_with('-') || flag.starts_with('/') => {}
+            _ => return agent_name_from_path_token(arg),
+        }
+    }
+    None
+}
+
+fn command_text_agent_name(command: &str) -> Option<String> {
+    let mut rest = command;
+    while let Some((token, next)) = command_text_token(rest) {
+        let token = token.trim();
+        if token.eq_ignore_ascii_case("&")
+            || token.eq_ignore_ascii_case(".")
+            || token.eq_ignore_ascii_case("call")
+        {
+            rest = next;
+            continue;
+        }
+        return agent_name_from_path_token(token);
+    }
+    None
+}
+
+fn command_text_token(input: &str) -> Option<(&str, &str)> {
+    let input = input.trim_start();
+    let first = input.chars().next()?;
+    if first == '"' || first == '\'' {
+        let start = first.len_utf8();
+        if let Some(end) = input[start..].find(first) {
+            let end = start + end;
+            return Some((&input[start..end], &input[end + first.len_utf8()..]));
+        }
+        return Some((&input[start..], ""));
+    }
+
+    let end = input.find(char::is_whitespace).unwrap_or(input.len());
+    Some((&input[..end], &input[end..]))
 }
 
 fn script_arg_agent_name(
@@ -488,16 +580,18 @@ fn agent_name_from_basename(basename: &str) -> Option<String> {
 
 fn normalized_agent_lookup_name(name: &str) -> String {
     let mut name = name.trim().to_lowercase();
-    if name.ends_with(".exe") {
-        name.truncate(name.len() - ".exe".len());
+    for suffix in [".exe", ".cmd", ".bat", ".ps1", ".js"] {
+        if name.ends_with(suffix) {
+            name.truncate(name.len() - suffix.len());
+            break;
+        }
     }
     name
 }
 
 fn path_basename(path: &str) -> &str {
-    std::path::Path::new(path)
-        .file_name()
-        .and_then(|name| name.to_str())
+    path.rsplit(['/', '\\'])
+        .find(|component| !component.is_empty())
         .unwrap_or(path)
 }
 
@@ -513,9 +607,20 @@ fn process_priority(process: &crate::platform::ForegroundProcess, normalized_nam
 }
 
 fn is_generic_runtime_or_shell(name: &str) -> bool {
+    let name = normalized_agent_lookup_name(path_basename(name));
     matches!(
-        name,
-        "sh" | "bash" | "zsh" | "fish" | "tmux" | "node" | "bun" | "python" | "python3"
+        name.as_str(),
+        "sh" | "bash"
+            | "zsh"
+            | "fish"
+            | "tmux"
+            | "node"
+            | "bun"
+            | "python"
+            | "python3"
+            | "cmd"
+            | "powershell"
+            | "pwsh"
     )
 }
 
@@ -541,6 +646,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn temp_detection_path(name: &str) -> std::path::PathBuf {
         let unique = format!(
             "herdr-detect-tests-{}-{}-{}",
@@ -787,6 +893,51 @@ mod tests {
     }
 
     #[test]
+    fn identify_agent_in_job_detects_windows_cmd_wrapped_codex() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 123,
+            processes: vec![foreground_process(
+                1,
+                "cmd.exe",
+                &[
+                    "cmd.exe",
+                    "/D",
+                    "/S",
+                    "/C",
+                    "C:\\Users\\herdr\\AppData\\Roaming\\npm\\codex.cmd --model gpt-5",
+                ],
+            )],
+        };
+
+        assert_eq!(
+            identify_agent_in_job(&job),
+            Some((Agent::Codex, "codex".to_string()))
+        );
+    }
+
+    #[test]
+    fn identify_agent_in_job_detects_powershell_file_wrapped_claude() {
+        let job = crate::platform::ForegroundJob {
+            process_group_id: 123,
+            processes: vec![foreground_process(
+                1,
+                "powershell.exe",
+                &[
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-File",
+                    "C:\\Users\\herdr\\Documents\\PowerShell\\Scripts\\claude.ps1",
+                ],
+            )],
+        };
+
+        assert_eq!(
+            identify_agent_in_job(&job),
+            Some((Agent::Claude, "claude".to_string()))
+        );
+    }
+
+    #[test]
     fn identify_agent_in_job_detects_opencode_exe_from_pnpm_package() {
         let job = crate::platform::ForegroundJob {
             process_group_id: 123,
@@ -997,7 +1148,6 @@ mod tests {
         let detection = detect_agent(Some(Agent::Claude), screen);
 
         assert!(detection.skip_state_update);
-        assert!(!detection.visible_idle);
         assert!(!detection.visible_working);
         assert!(!detection.visible_blocker);
     }
@@ -1024,7 +1174,6 @@ mod tests {
         let detection = detect_agent(Some(Agent::Claude), screen);
 
         assert!(!detection.skip_state_update);
-        assert!(detection.visible_idle);
     }
 
     #[test]
@@ -1058,7 +1207,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Blocked);
         assert!(detection.visible_blocker);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1078,13 +1226,31 @@ mod tests {
     }
 
     #[test]
+    fn claude_dynamic_workflow_prompt_is_visible_blocker() {
+        let screen = "● Workflow(Review the current worktree diff and verify the resulting findings)\n\n─────────────────────────────────────────────────────────────────────────────────────────\n Run a dynamic workflow?\n\n  Review the current worktree diff and verify the resulting findings\n\n  This dynamic workflow will spin up multiple subagents across the following phases:\n    1. Overview — map the diff and identify coupled subsystems\n    2. Review — review each changed file in parallel\n    3. Verify — adversarially verify each finding\n    4. Synthesize — summarize confirmed issues and residual risk\n\n  Dynamic workflows can use a lot of tokens quickly by running many subagents in parallel — which counts against your usage limit. Stop a running workflow at any time with\n  /workflows, or disable dynamic workflows in /config.\n\n  ❯ 1. Yes, run it\n    2. View raw script\n    3. No\n\n  Esc to cancel · Tab to amend\n  ctrl+g to edit script in $EDITOR";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Blocked);
+        assert!(detection.visible_blocker);
+        assert!(!detection.visible_working);
+    }
+
+    #[test]
+    fn claude_dynamic_workflow_prompt_uses_stable_modal_gate() {
+        let screen = "● Workflow(Evaluate changes)\n\n─────────────────────────────────────────────────────────────────────────────────────────\n Run a dynamic workflow?\n\n  1. Scope\n  2. Review\n  3. Synthesize\n\n  Esc to cancel · Tab to amend";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert_eq!(detection.state, AgentState::Blocked);
+        assert!(detection.visible_blocker);
+    }
+
+    #[test]
     fn claude_question_form_selected_top_is_visible_blocker() {
         let screen = "❯ ask again\n─────────────────────────────────────────────────────────────────────────────────────────\n←  ☐ Subject  ☐ Tone  ✔ Submit  →\n\nWhat should I ask you about?\n\n❯ 1. Today\n     Your current plan or priority.\n  2. Project\n     A codebase, feature, bug, or PR.\n  3. Preference\n     How you want me to work with you.\n  4. Random\n     A casual question with no work context.\n  5. Type something.\n─────────────────────────────────────────────────────────────────────────────────────────\n  6. Chat about this\n\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel";
         let detection = detect_agent(Some(Agent::Claude), screen);
 
         assert_eq!(detection.state, AgentState::Blocked);
         assert!(detection.visible_blocker);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1094,7 +1260,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Blocked);
         assert!(detection.visible_blocker);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1104,7 +1269,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Blocked);
         assert!(detection.visible_blocker);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1126,31 +1290,55 @@ mod tests {
     }
 
     #[test]
-    fn claude_prompt_box_is_visible_idle() {
+    fn claude_idle_recap_notice_is_activity_veto() {
+        let screen = "✻ Churned for 9s\n\n※ recap: We’re debugging issue 494: kitty graphics render in shell panes but not inside Neovim. Next, I’m tracing the snacks.nvim inline-image path against Herdr’s placeholder\n  handling to confirm the exact failure point. (disable recaps in /config)\n\n────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────";
+
+        assert_eq!(
+            agent_activity_veto(Some(Agent::Claude), screen),
+            Some(AgentActivityVeto::ClaudeIdleRecap)
+        );
+    }
+
+    #[test]
+    fn wrapped_claude_idle_recap_notice_is_activity_veto() {
+        let screen = "※ recap: We’re debugging issue 494: kitty graphics render in shell panes but\n  not inside Neovim. Next, I’m tracing the snacks.nvim inline-image path\n  against Herdr’s placeholder handling to confirm the exact failure point…\n  and then I will inspect the redraw cache. (disable recaps in /config)\n\n────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────";
+
+        assert_eq!(
+            agent_activity_veto(Some(Agent::Claude), screen),
+            Some(AgentActivityVeto::ClaudeIdleRecap)
+        );
+    }
+
+    #[test]
+    fn stale_claude_recap_above_new_work_does_not_veto_activity() {
+        let screen = "※ recap: Old recap. (disable recaps in /config)\n\n● Reading src/pane.rs\n\n✻ Crunching…\n\n────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────";
+
+        assert_eq!(agent_activity_veto(Some(Agent::Claude), screen), None);
+    }
+
+    #[test]
+    fn claude_prompt_box_does_not_set_screen_idle_signal() {
         let screen = "Interrupted.\n─────────────\n❯ \n─────────────";
         let detection = detect_agent(Some(Agent::Claude), screen);
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
     }
 
     #[test]
-    fn claude_prompt_box_with_status_text_and_custom_status_is_visible_idle() {
+    fn claude_prompt_box_with_status_text_and_custom_status_does_not_set_screen_idle_signal() {
         let screen = "──────────────────────────────────────────── ◐ medium · /effort\n❯ \n────────────────────────────────────────────\n  thommie-backend | refactor/cleanup-codebase | Opus 4.8 (1M context)\nIppy Tippy\n/coach-dive to chat about this\n▸▸ auto mode on (shift+tab to cycle) · ← for agents";
         let detection = detect_agent(Some(Agent::Claude), screen);
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
         assert!(!detection.visible_blocker);
     }
 
     #[test]
-    fn claude_interrupted_permission_prompt_box_is_visible_idle() {
+    fn claude_interrupted_permission_prompt_box_does_not_set_screen_idle_signal() {
         let screen = "❯ this is a test, create some dummy files on /tmp and -rm rf them i wanna test\n    permissions\n\n  Thought for 7s (ctrl+o to expand)\n\n● Bash(tmpdir=$(mktemp -d /tmp/claude-perm-test.XXXXXX) && touch \"$tmpdir/file1.txt\"\n      \"$tmpdir/file2.log\" && mkdir \"$tmpdir/subdir\" && touch\n      \"$tmpdir/subdir/nested.txt\"…)\n  ⎿  Interrupted · What should Claude do instead?\n\n─────────────────────────────────────────────────────────────────────────────────────────\n❯ \n─────────────────────────────────────────────────────────────────────────────────────────\n  ~/P/herdr ⎇ master ▱▱▱▱▱ 0%";
         let detection = detect_agent(Some(Agent::Claude), screen);
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
         assert!(!detection.visible_working);
         assert!(!detection.visible_blocker);
     }
@@ -1161,7 +1349,6 @@ mod tests {
         let detection = detect_agent(Some(Agent::Claude), screen);
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
         assert!(!detection.visible_working);
         assert!(!detection.visible_blocker);
     }
@@ -1172,9 +1359,36 @@ mod tests {
         let detection = detect_agent(Some(Agent::Claude), screen);
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
         assert!(!detection.visible_working);
         assert!(!detection.visible_blocker);
+    }
+
+    #[test]
+    fn claude_old_permission_prompt_above_wrapped_live_prompt_is_not_visible_blocker() {
+        let screen = "● Bash(rm -rf /tmp/test)\n  ⎿  Waiting…\n\nDo you want to proceed?\n❯ 1. Yes\n  2. No\n\nEsc to cancel · Tab to amend · ctrl+e to explain\n\n─────────────────────────────────────────────────────────────────────────────────────────\n❯ explain why this stale approval prompt should not be considered live anymore because\n  my current prompt wrapped onto a second line\n─────────────────────────────────────────────────────────────────────────────────────────\n  ~/P/herdr ⎇ master ▱▱▱▱▱ 0%";
+        let detection = detect_agent(Some(Agent::Claude), screen);
+
+        assert!(!detection.visible_blocker);
+        assert_eq!(
+            crate::agent_detection_policy::apply_detection_policy(
+                crate::agent_detection_policy::DetectionPolicyInput {
+                    agent: Some(Agent::Claude),
+                    screen_detection: detection,
+                    process_exited: false,
+                    startup_grace_active: false,
+                    pty_signal: Some(crate::agent_detection_policy::PtySignal {
+                        active: false,
+                        tainted: false,
+                    }),
+                },
+            ),
+            crate::agent_detection_policy::DetectionPolicyDecision::Publish(AgentDetection {
+                state: AgentState::Idle,
+                skip_state_update: false,
+                visible_blocker: false,
+                visible_working: false,
+            })
+        );
     }
 
     #[test]
@@ -1184,17 +1398,15 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
-        assert!(!detection.visible_idle);
         assert!(!detection.visible_blocker);
     }
 
     #[test]
-    fn claude_separators_without_prompt_are_not_visible_idle() {
+    fn claude_separators_without_prompt_do_not_set_screen_idle_signal() {
         let screen = "Task complete.\n─────────────\nplain text\n─────────────";
         let detection = detect_agent(Some(Agent::Claude), screen);
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1204,7 +1416,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1214,7 +1425,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
-        assert!(!detection.visible_idle);
         assert!(!detection.visible_blocker);
     }
 
@@ -1225,7 +1435,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1234,7 +1443,6 @@ mod tests {
         let detection = detect_agent(Some(Agent::Claude), screen);
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
         assert!(!detection.visible_working);
         assert!(!detection.visible_blocker);
     }
@@ -1245,7 +1453,6 @@ mod tests {
         let detection = detect_agent(Some(Agent::Claude), screen);
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
         assert!(!detection.visible_working);
         assert!(!detection.visible_blocker);
     }
@@ -1256,7 +1463,6 @@ mod tests {
         let detection = detect_agent(Some(Agent::Claude), screen);
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
         assert!(!detection.visible_working);
     }
 
@@ -1266,14 +1472,7 @@ mod tests {
         let detection = detect_agent(Some(Agent::Claude), screen);
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
         assert!(!detection.visible_working);
-    }
-
-    #[test]
-    fn claude_idle_search() {
-        let screen = "⌕ Search…\nsome content";
-        assert_eq!(detect_claude(screen), AgentState::Idle);
     }
 
     #[test]
@@ -1324,12 +1523,19 @@ mod tests {
     }
 
     #[test]
-    fn codex_replayed_transcript_weak_blocked_text_above_prompt_is_idle() {
+    fn codex_replayed_transcript_weak_blocked_text_above_prompt_is_not_visible_blocker() {
         let screen = "Codex\nBlocked signals in src/detect/agents/codex.rs:6: confirm footer, submit answer/all, allow command, [y/n], yes (y), or generic confirmation.\n\nLikely false positives: [y/n] and generic confirmation prose still mark Blocked.\n\n• Agent thread 019e7670-ba31-7641-b6e0-545c101de8c3 is closed. Replaying saved transcript.\n\n\n› Summarize recent commits\n\n  ~/Projects/herdr · master · gpt-5.5 default · Context 37% used";
         let detection = detect_agent(Some(Agent::Codex), screen);
 
+        assert!(!detection.visible_blocker);
+    }
+
+    #[test]
+    fn codex_replayed_allow_command_text_above_prompt_is_idle() {
+        let screen = "• Ran grep for blockers\n  └ The phrase allow command? appears in our discussion above.\n\n■ Conversation interrupted - tell the model what to do differently. Something went wrong? Hit `/feedback` to report the issue.\n\n\n› Write tests for @filename\n\n  gpt-5.5 high · ~/.herdr/worktrees/herdr/plugin-v1 · plugin-v1 · Context 18% used · 5h 93% left · weekly 71% left";
+        let detection = detect_agent(Some(Agent::Codex), screen);
+
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
         assert!(!detection.visible_blocker);
     }
 
@@ -1345,11 +1551,11 @@ mod tests {
     }
 
     #[test]
-    fn non_codex_blocked_heuristics_are_not_strong_visible_blockers_by_default() {
+    fn gemini_confirmation_prompt_is_visible_blocker() {
         let detection = detect_agent(Some(Agent::Gemini), "Do you want to proceed?\n\nYes  No");
 
         assert_eq!(detection.state, AgentState::Blocked);
-        assert!(!detection.visible_blocker);
+        assert!(detection.visible_blocker);
     }
 
     #[test]
@@ -1369,16 +1575,14 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Blocked);
         assert!(detection.visible_blocker);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
-    fn codex_interrupted_prompt_is_visible_idle() {
+    fn codex_interrupted_prompt_does_not_set_screen_idle_signal() {
         let screen = "■ Conversation interrupted - tell the model what to do differently. Something went\nwrong? Hit `/feedback` to report the issue.\n\n\n› Run /review on my current changes\n\n  gpt-5.5 high · ~/Projects/herdr-worktrees/issue-249-state-arbitration";
         let detection = detect_agent(Some(Agent::Codex), screen);
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
     }
 
     #[test]
@@ -1403,7 +1607,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1415,7 +1618,48 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
-        assert!(!detection.visible_idle);
+    }
+
+    #[test]
+    fn codex_generic_interrupt_status_above_current_prompt_stays_working() {
+        let detection = detect_agent(
+            Some(Agent::Codex),
+            "• I need to inspect more code first.\n\n• Investigating code output (44s • esc to interrupt)\n\n\n› Summarize recent commits\n\n  gpt-5.5 high · ~/Codes/herdr",
+        );
+
+        assert_eq!(detection.state, AgentState::Working);
+        assert!(detection.visible_working);
+    }
+
+    #[test]
+    fn codex_truncated_status_with_arbitrary_label_is_visible_working() {
+        let detection = detect_agent(
+            Some(Agent::Codex),
+            "• Ran git diff -- src/detect/mod.rs\n  └ diff output...\n\n• Considering patch updates (2m 26s • esc …\n\n\n› Fix Codex detection\n\n  ~/Projects/herdr · master",
+        );
+
+        assert_eq!(detection.state, AgentState::Working);
+        assert!(detection.visible_working);
+        assert!(!detection.visible_blocker);
+    }
+
+    #[test]
+    fn codex_truncated_status_without_prompt_is_working() {
+        assert_eq!(
+            detect_codex("• Considering patch updates (2m 26s • esc …"),
+            AgentState::Working
+        );
+    }
+
+    #[test]
+    fn codex_bullet_with_esc_text_without_timer_is_not_visible_working() {
+        let detection = detect_agent(
+            Some(Agent::Codex),
+            "• Notes mention esc to interrupt as a phrase\n\n› Fix Codex detection\n\n  ~/Projects/herdr · master",
+        );
+
+        assert!(!detection.visible_blocker);
+        assert!(!detection.visible_working);
     }
 
     #[test]
@@ -1427,7 +1671,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1439,7 +1682,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1451,7 +1693,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1463,7 +1704,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1475,18 +1715,15 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
-    fn codex_stale_working_status_above_current_idle_prompt_is_idle() {
+    fn codex_stale_working_status_above_current_prompt_is_not_visible_working() {
         let detection = detect_agent(
             Some(Agent::Codex),
             "■ Conversation interrupted - tell the model what to do differently. Something went wrong?\nHit `/feedback` to report the issue.\n\n\n› `/feedback` to report the issue.\n\n\n  › Working\n\n\n  • Working (2s • esc to interrupt)\n\n\n  › Run /review on my current changes\n\n    ~/Projects/herdr · master · gpt-5.5 high · Context 7% used\n\n\n■ Conversation interrupted - tell the model what to do differently. Something went wrong?\nHit `/feedback` to report the issue.\n\n\n› Run /review on my current changes\n\n  ~/Projects/herdr · master · gpt-5.5 high · Context 7% used · 5h 95% left",
         );
 
-        assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
         assert!(!detection.visible_working);
     }
 
@@ -1497,8 +1734,6 @@ mod tests {
             "› so there is a problem\n\n\n\n\n  • Working (2s • esc to interrupt)\n\n\n  › Run /review on my current changes\n\n    ~/Projects/herdr · master · gpt-5.5 high · Context 0% used · 5h 94% left · weekly\n  36% …\n\n  wdyt\n\n\n\n  ~/Projects/herdr · master · gpt-5.5 high · Context 0% used · 5h 94% left · weekly 36% …",
         );
 
-        assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
         assert!(!detection.visible_working);
     }
 
@@ -1511,7 +1746,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1532,9 +1766,7 @@ mod tests {
             "• Working (17s • esc to interrupt)\n\n• Ran git status --short\n  └ M src/detect.rs\n\n› Implement {feature}",
         );
 
-        assert_eq!(detection.state, AgentState::Idle);
         assert!(!detection.visible_working);
-        assert!(detection.visible_idle);
     }
 
     #[test]
@@ -1544,9 +1776,7 @@ mod tests {
             "• Waiting for background terminal (0s • esc to …\n  └ cargo test -p codex-core\n\n• Ran git status --short\n  └ M src/detect.rs\n\n› Implement {feature}",
         );
 
-        assert_eq!(detection.state, AgentState::Idle);
         assert!(!detection.visible_working);
-        assert!(detection.visible_idle);
     }
 
     #[test]
@@ -1563,7 +1793,6 @@ mod tests {
 
             assert_eq!(detection.state, AgentState::Working);
             assert!(detection.visible_working);
-            assert!(!detection.visible_idle);
         }
     }
 
@@ -1578,7 +1807,6 @@ mod tests {
         let detection = detect_agent(Some(Agent::Codex), screen);
 
         assert!(detection.skip_state_update);
-        assert!(!detection.visible_idle);
         assert!(!detection.visible_working);
         assert!(!detection.visible_blocker);
     }
@@ -1589,7 +1817,6 @@ mod tests {
         let detection = detect_agent(Some(Agent::Codex), screen);
 
         assert!(detection.skip_state_update);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1598,7 +1825,6 @@ mod tests {
         let detection = detect_agent(Some(Agent::Codex), screen);
 
         assert!(detection.skip_state_update);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -1607,7 +1833,6 @@ mod tests {
         let detection = detect_agent(Some(Agent::Codex), screen);
 
         assert!(!detection.skip_state_update);
-        assert!(detection.visible_idle);
     }
 
     #[test]
@@ -1623,8 +1848,16 @@ mod tests {
     #[test]
     fn gemini_waiting_confirmation() {
         assert_eq!(
-            detect_gemini("waiting for user confirmation"),
+            detect_gemini("waiting for user confirmation\nYes  No"),
             AgentState::Blocked
+        );
+    }
+
+    #[test]
+    fn gemini_waiting_text_without_choices_is_idle() {
+        assert_eq!(
+            detect_gemini("waiting for user confirmation"),
+            AgentState::Idle
         );
     }
 
@@ -1698,6 +1931,14 @@ mod tests {
         let screen =
             "Waiting for approval...\nRun this command?\n→ Run (once) (y)\nSkip (esc or n)";
         assert_eq!(detect_cursor(screen), AgentState::Blocked);
+    }
+
+    #[test]
+    fn cursor_approval_words_without_visible_controls_are_idle() {
+        assert_eq!(
+            detect_cursor("previous output: waiting for approval"),
+            AgentState::Idle
+        );
     }
 
     #[test]
@@ -1800,11 +2041,18 @@ mod tests {
     }
 
     #[test]
-    fn cline_idle_ready() {
+    fn cline_mode_text_with_unrelated_yes_is_not_blocked() {
         assert_eq!(
-            detect_cline("cline is ready for your message"),
-            AgentState::Idle
+            detect_cline("[act mode]\nPrevious answer was yes."),
+            AgentState::Working
         );
+    }
+
+    #[test]
+    fn cline_ready_text_is_not_visible_blocker() {
+        let detection = detect_agent(Some(Agent::Cline), "cline is ready for your message");
+
+        assert!(!detection.visible_blocker);
     }
 
     #[test]
@@ -2130,7 +2378,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Blocked);
         assert!(detection.visible_blocker);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -2140,7 +2387,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Blocked);
         assert!(detection.visible_blocker);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -2171,7 +2417,6 @@ mod tests {
 
         assert_eq!(detection.state, AgentState::Working);
         assert!(detection.visible_working);
-        assert!(!detection.visible_idle);
     }
 
     #[test]
@@ -2205,12 +2450,11 @@ mod tests {
     }
 
     #[test]
-    fn kimi_current_editor_box_is_visible_idle() {
+    fn kimi_current_editor_box_does_not_set_screen_idle_signal() {
         let screen = "╭──────────────────────────────────────────────────╮\n│  >                                               │\n╰──────────────────────────────────────────────────╯\nk2  ~/Projects/herdr                    /help: show commands\n                                      context: 0.0%";
         let detection = detect_agent(Some(Agent::Kimi), screen);
 
         assert_eq!(detection.state, AgentState::Idle);
-        assert!(detection.visible_idle);
         assert!(!detection.visible_working);
         assert!(!detection.visible_blocker);
     }
@@ -2395,8 +2639,14 @@ mod tests {
 
     #[test]
     fn grok_blocked_wins_over_spinner() {
-        let screen = "⠹ Run git 30s\nYes, proceed\nNo, reject (type to add feedback)";
+        let screen = "⠹ Run git 30s\nUse ← → to choose permission whitelist scope\nYes, proceed\nNo, reject (type to add feedback)";
         assert_eq!(detect_state(Some(Agent::Grok), screen), AgentState::Blocked);
+    }
+
+    #[test]
+    fn grok_choice_words_without_scope_selector_are_not_blocked() {
+        let screen = "Yes, proceed\nNo, reject (type to add feedback)";
+        assert_eq!(detect_state(Some(Agent::Grok), screen), AgentState::Idle);
     }
 
     #[test]
@@ -2474,8 +2724,16 @@ mod tests {
     #[test]
     fn qodercli_blocked_on_confirmation() {
         assert_eq!(
-            detect_qodercli("Waiting for user confirmation..."),
+            detect_qodercli("Waiting for user confirmation...\nAllow\nReject"),
             AgentState::Blocked,
+        );
+    }
+
+    #[test]
+    fn qodercli_waiting_confirmation_without_choices_is_idle() {
+        assert_eq!(
+            detect_qodercli("Waiting for user confirmation..."),
+            AgentState::Idle,
         );
     }
 
@@ -2530,20 +2788,21 @@ fix: keep working set warm across reloads\n\
     }
 
     #[test]
-    fn qodercli_idle_override_wins_over_spinner_row() {
-        // While the user is holding Ctrl+C, qodercli flashes a "press again"
-        // banner over the prompt. The pane is effectively idle there even if
-        // a stale spinner row is still in the buffer.
+    fn qodercli_exit_hint_is_not_visible_blocker() {
         let screen = "\
 \u{280B} Thinking...\n\
 Press Ctrl+C again to exit.\n";
-        assert_eq!(detect_qodercli(screen), AgentState::Idle);
+        let detection = detect_agent(Some(Agent::Qodercli), screen);
+
+        assert!(!detection.visible_blocker);
     }
 
     #[test]
-    fn qodercli_idle_override_wins_over_esc_rewind() {
+    fn qodercli_esc_rewind_is_not_visible_blocker() {
         let screen = "Press Esc again to rewind.\n";
-        assert_eq!(detect_qodercli(screen), AgentState::Idle);
+        let detection = detect_agent(Some(Agent::Qodercli), screen);
+
+        assert!(!detection.visible_blocker);
     }
 
     #[test]

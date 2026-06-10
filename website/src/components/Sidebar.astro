@@ -6,7 +6,34 @@ import SidebarSublist from '@astrojs/starlight/components/SidebarSublist.astro';
 const { sidebar } = Astro.locals.starlightRoute;
 const pathname = Astro.url.pathname;
 const isPreview = pathname === '/docs/preview/' || pathname.startsWith('/docs/preview/');
-const channelSidebar = isPreview ? rewriteSidebar(sidebar) : sidebar;
+const channelSidebar = isPreview ? addPreviewOnlyItems(rewriteSidebar(sidebar)) : sidebar;
+
+function addPreviewOnlyItems(entries) {
+  return entries.map((entry) => {
+    if (entry.type !== 'group' || entry.label !== 'Start here') return entry;
+
+    const windowsBeta = {
+      type: 'link',
+      label: 'Windows beta',
+      href: '/docs/preview/windows-beta/',
+      badge: undefined,
+      isCurrent: samePath('/docs/preview/windows-beta/', pathname),
+      attrs: {},
+    };
+    const nextEntries = [];
+    for (const child of entry.entries) {
+      nextEntries.push(child);
+      if (child.type === 'link' && child.label === 'Install') {
+        nextEntries.push(windowsBeta);
+      }
+    }
+
+    return {
+      ...entry,
+      entries: nextEntries,
+    };
+  });
+}
 
 function rewriteSidebar(entries) {
   return entries.map((entry) => {

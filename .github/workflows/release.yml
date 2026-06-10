@@ -191,6 +191,7 @@ jobs:
           GH_TOKEN: ${{ secrets.KANGAL_GITHUB_TOKEN }}
           NEXT_RELEASE_LABEL: pending-release
           LEGACY_NEXT_RELEASE_LABEL: included-in-next-release
+          PREVIEW_RELEASED_LABEL: preview-released
         run: |
           set -euo pipefail
 
@@ -246,9 +247,10 @@ jobs:
 
             HAS_NEXT_RELEASE_LABEL="$(jq -r --arg label "$NEXT_RELEASE_LABEL" 'any(.labels[].name; . == $label)' <<<"$data")"
             HAS_LEGACY_NEXT_RELEASE_LABEL="$(jq -r --arg label "$LEGACY_NEXT_RELEASE_LABEL" 'any(.labels[].name; . == $label)' <<<"$data")"
-            HAS_PENDING_RELEASE_LABEL="false"
-            if [ "$HAS_NEXT_RELEASE_LABEL" = "true" ] || [ "$HAS_LEGACY_NEXT_RELEASE_LABEL" = "true" ]; then
-              HAS_PENDING_RELEASE_LABEL="true"
+            HAS_PREVIEW_RELEASED_LABEL="$(jq -r --arg label "$PREVIEW_RELEASED_LABEL" 'any(.labels[].name; . == $label)' <<<"$data")"
+            HAS_RELEASE_TRACKING_LABEL="false"
+            if [ "$HAS_NEXT_RELEASE_LABEL" = "true" ] || [ "$HAS_LEGACY_NEXT_RELEASE_LABEL" = "true" ] || [ "$HAS_PREVIEW_RELEASED_LABEL" = "true" ]; then
+              HAS_RELEASE_TRACKING_LABEL="true"
             fi
             MARKER_STATUS=0
             issue_has_comment_marker "$issue" "$RELEASE_COMMENT_MARKER" || MARKER_STATUS="$?"
@@ -270,7 +272,7 @@ jobs:
                 echo "::warning::Could not close issue #$issue."
                 continue
               fi
-            elif [ "$HAS_PENDING_RELEASE_LABEL" = "true" ]; then
+            elif [ "$HAS_RELEASE_TRACKING_LABEL" = "true" ]; then
               if [ "$HAS_RELEASE_COMMENT" != "true" ]; then
                 if ! gh issue comment "$issue" --repo "$GITHUB_REPOSITORY" --body "$RELEASE_COMMENT"; then
                   echo "::warning::Could not comment on issue #$issue."
@@ -280,7 +282,7 @@ jobs:
                 echo "Skipping release comment for #$issue because it already exists."
               fi
             else
-              echo "Skipping release comment for #$issue because it is closed and has no $NEXT_RELEASE_LABEL label."
+              echo "Skipping release comment for #$issue because it is closed and has no release tracking label."
             fi
 
             if [ "$HAS_NEXT_RELEASE_LABEL" = "true" ]; then
@@ -293,6 +295,13 @@ jobs:
             if [ "$HAS_LEGACY_NEXT_RELEASE_LABEL" = "true" ]; then
               if ! gh issue edit "$issue" --repo "$GITHUB_REPOSITORY" --remove-label "$LEGACY_NEXT_RELEASE_LABEL"; then
                 echo "::warning::Could not remove $LEGACY_NEXT_RELEASE_LABEL from issue #$issue."
+                continue
+              fi
+            fi
+
+            if [ "$HAS_PREVIEW_RELEASED_LABEL" = "true" ]; then
+              if ! gh issue edit "$issue" --repo "$GITHUB_REPOSITORY" --remove-label "$PREVIEW_RELEASED_LABEL"; then
+                echo "::warning::Could not remove $PREVIEW_RELEASED_LABEL from issue #$issue."
                 continue
               fi
             fi

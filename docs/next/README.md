@@ -25,6 +25,12 @@ workspaces, tabs, panes. mouse-native: click, drag, split. every agent at a glan
 curl -fsSL https://herdr.dev/install.sh | sh
 ```
 
+on windows preview beta:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://herdr.dev/install.ps1 | iex"
+```
+
 or install with homebrew:
 
 ```bash
@@ -37,7 +43,9 @@ or install with mise:
 mise use -g herdr
 ```
 
-or download the binary from [releases](https://github.com/ogulcancelik/herdr/releases). requires linux or macos.
+if mise reports `herdr not found in mise tool registry`, update mise and retry. older mise versions predate the herdr registry entry; `mise use -g github:ogulcancelik/herdr` works as a temporary fallback.
+
+or download the stable Linux/macOS binary from [releases](https://github.com/ogulcancelik/herdr/releases). Native Windows binaries are preview-only beta builds.
 
 ## quick start
 
@@ -73,15 +81,15 @@ Herdr notifies you when a new version is available. Run manually:
 herdr update
 ```
 
-`herdr update` is for installs managed by Herdr's own installer. Homebrew, mise, and Nix installs update through `brew upgrade herdr`, `mise upgrade herdr`, or your Nix workflow, then use the same stop-and-run-again flow if a session is still running the old server. Direct installs can opt into development preview builds with `herdr channel set preview` and return to stable with `herdr channel set stable`. See [install docs](https://herdr.dev/docs/install/) and [session state docs](https://herdr.dev/docs/session-state/) for the full update, restart, restore, and handoff matrix.
+`herdr update` is for installs managed by Herdr's own installer. Homebrew, mise, and Nix installs update through `brew upgrade herdr`, `mise upgrade herdr`, or your Nix workflow, then use the same stop-and-run-again flow if a session is still running the old server. Linux and macOS direct installs can opt into development preview builds with `herdr channel set preview` and return to stable with `herdr channel set stable`. Windows beta installs are preview-only for now. See [install docs](https://herdr.dev/docs/install/) and [session state docs](https://herdr.dev/docs/session-state/) for the full update, restart, restore, and handoff matrix.
 
-Herdr uses the stable update channel by default. To test preview builds from `master` before the next stable release:
+Linux and macOS direct installs use the stable update channel by default. Windows beta installs default to preview. To test preview builds from `master` before the next stable release:
 
 ```bash
 herdr channel set preview
 ```
 
-To return to stable:
+To return Linux and macOS direct installs to stable:
 
 ```bash
 herdr channel set stable
@@ -145,7 +153,7 @@ states:
 - 🔵 **done** — work finished, you have not looked at it yet
 - 🟢 **idle** — done and seen
 
-detection works by reading foreground process and terminal output. zero config, no hooks required. official claude code, codex, droid, and opencode integrations provide session restore identity; pi, omp, github copilot cli, kimi code cli, hermes, qodercli, and custom socket integrations can report their own state.
+detection works by reading foreground process and terminal output. zero config, no hooks required. official claude code, codex, github copilot cli, droid, kimi code cli, qodercli, and cursor agent cli integrations provide session restore identity; pi, omp, opencode, kilo code cli, hermes, and custom socket integrations can report their own state.
 
 ## lives in your terminal
 
@@ -162,7 +170,7 @@ not a gui window, not a web dashboard, not electron. herdr runs inside whatever 
 
 ## agents can use herdr too
 
-The local Unix socket lets agents create workspaces, split panes, spawn helpers, read output, and wait for state changes. Start with the [socket API docs](https://herdr.dev/docs/socket-api/) and [`SKILL.md`](./SKILL.md).
+The local Unix socket lets agents create workspaces, split or zoom panes, spawn helpers, read output, and wait for state changes. Start with the [socket API docs](https://herdr.dev/docs/socket-api/) and [`SKILL.md`](./SKILL.md).
 
 ## supported agents
 
@@ -192,7 +200,7 @@ for agents outside the built-in list, herdr still works as a terminal multiplexe
 
 ### direct integrations
 
-official integrations have two roles. claude code, codex, droid, and opencode report session identity for native restore, while their state still comes from screen detection. pi, github copilot cli, and hermes report both semantic state and session identity. omp, kimi code cli, and qodercli report semantic state without native session restore. install with:
+official integrations have two roles. claude code, codex, github copilot cli, droid, kimi code cli, qodercli, and cursor agent cli report session identity for native restore, while their state still comes from screen detection. pi, opencode, kilo code cli, and hermes report both semantic state and session identity. omp reports semantic state without native session restore. install with:
 
 ```bash
 herdr integration install pi
@@ -203,8 +211,10 @@ herdr integration install copilot
 herdr integration install droid
 herdr integration install kimi
 herdr integration install opencode
+herdr integration install kilo
 herdr integration install hermes
 herdr integration install qodercli
+herdr integration install cursor
 ```
 
 see the [integrations docs](https://herdr.dev/docs/integrations/) for setup details.
@@ -225,6 +235,7 @@ Press `ctrl+b` to enter prefix mode. Default actions are prefix-first and tmux-l
 | `prefix+shift+w` | rename workspace |
 | `prefix+shift+d` | close workspace |
 | `prefix+h/j/k/l` | focus pane |
+| `prefix+shift+h/j/k/l` | swap pane |
 | `prefix+v` / `prefix+minus` | split pane |
 | `prefix+x` | close pane |
 | `prefix+b` | toggle sidebar |
@@ -250,7 +261,7 @@ In-app settings cover theme, sound, and toast preferences. Herdr writes logs und
 - [install](https://herdr.dev/docs/install/) — install, update, Homebrew, mise, and Nix
 - [session state](https://herdr.dev/docs/session-state/) — detach, restart restore, agent restore, and live handoff
 - [configuration](https://herdr.dev/docs/configuration/) — keybindings, themes, notifications, environment variables
-- [integrations](https://herdr.dev/docs/integrations/) — pi, omp, claude code, codex, github copilot cli, droid, kimi code cli, opencode, hermes, qodercli integrations
+- [integrations](https://herdr.dev/docs/integrations/) — pi, omp, claude code, codex, cursor agent cli, github copilot cli, droid, kimi code cli, opencode, kilo code cli, hermes, qodercli integrations
 - [`SKILL.md`](./SKILL.md) — reusable agent skill
 - [socket api](https://herdr.dev/docs/socket-api/) — socket protocol and cli reference
 

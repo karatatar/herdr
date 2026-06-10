@@ -451,7 +451,12 @@ impl AppState {
                     return None;
                 }
                 if self.on_new_tab_button(mouse.column, mouse.row) {
-                    open_new_tab_dialog(self);
+                    if self.prompt_new_tab_name {
+                        open_new_tab_dialog(self);
+                    } else {
+                        self.request_new_tab = true;
+                        self.mode = Mode::Terminal;
+                    }
                     return None;
                 }
 
@@ -950,7 +955,6 @@ impl AppState {
                 if let (Some(ws_idx), Some(tab_idx)) =
                     (self.active, self.tab_at(mouse.column, mouse.row))
                 {
-                    self.switch_tab(tab_idx);
                     self.context_menu = Some(ContextMenuState {
                         kind: ContextMenuKind::Tab { ws_idx, tab_idx },
                         x: mouse.column,
@@ -963,17 +967,30 @@ impl AppState {
 
             MouseEventKind::Down(MouseButton::Right) if !in_sidebar => {
                 if let Some(info) = self.pane_mouse_target(mouse.column, mouse.row).cloned() {
-                    self.focus_pane(info.id);
+                    let ws_idx = self.active?;
+                    let tab_idx = self
+                        .workspaces
+                        .get(ws_idx)
+                        .map(|ws| ws.active_tab_index())?;
+                    let previous_focused_pane_id = self
+                        .workspaces
+                        .get(ws_idx)
+                        .and_then(|ws| ws.focused_pane_id());
+                    let source_pane_id =
+                        previous_focused_pane_id.filter(|pane_id| *pane_id != info.id);
                     let has_manual_label = self
-                        .active
-                        .and_then(|ws_idx| self.workspaces.get(ws_idx))
+                        .workspaces
+                        .get(ws_idx)
                         .and_then(|ws| ws.pane_state(info.id))
                         .and_then(|pane| self.terminals.get(&pane.attached_terminal_id))
                         .and_then(|terminal| terminal.manual_label.as_ref())
                         .is_some();
                     self.context_menu = Some(ContextMenuState {
                         kind: ContextMenuKind::Pane {
+                            ws_idx,
+                            tab_idx,
                             pane_id: info.id,
+                            source_pane_id,
                             has_manual_label,
                         },
                         x: mouse.column,
@@ -1035,7 +1052,12 @@ impl AppState {
                 self.mode = Mode::Terminal;
             }
             Some(crate::ui::MobileSwitcherTarget::NewTab) => {
-                open_new_tab_dialog(self);
+                if self.prompt_new_tab_name {
+                    open_new_tab_dialog(self);
+                } else {
+                    self.request_new_tab = true;
+                    self.mode = Mode::Terminal;
+                }
             }
             Some(crate::ui::MobileSwitcherTarget::Tab(tab_idx)) => {
                 self.switch_tab(tab_idx);
@@ -1535,10 +1557,7 @@ impl AppState {
         else {
             return false;
         };
-        if !rt
-            .input_state()
-            .is_some_and(crate::pane::InputState::mouse_reporting_enabled)
-        {
+        if rt.wheel_routing() != Some(crate::pane::WheelRouting::MouseReport) {
             return false;
         }
         rt.scroll_reset();
@@ -1997,6 +2016,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pane_right_click_keeps_focus_and_swap_menu_swaps_with_focused_pane() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("test");
+        let source = ws.tabs[0].root_pane;
+        let target = ws.test_split(Direction::Horizontal);
+        ws.tabs[0].layout.focus_pane(source);
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 100, 20));
+        let target_info = app
+            .state
+            .view
+            .pane_infos
+            .iter()
+            .find(|info| info.id == target)
+            .expect("target pane info")
+            .clone();
+        let source_rect_before = app
+            .state
+            .view
+            .pane_infos
+            .iter()
+            .find(|info| info.id == source)
+            .expect("source pane info")
+            .rect;
+        let target_rect_before = target_info.rect;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            target_info.inner_rect.x,
+            target_info.inner_rect.y,
+        ));
+
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(source));
+        let menu = app.state.context_menu.as_mut().expect("pane context menu");
+        assert!(matches!(
+            menu.kind,
+            ContextMenuKind::Pane {
+                pane_id,
+                source_pane_id: Some(source_pane_id),
+                ..
+            } if pane_id == target && source_pane_id == source
+        ));
+        let swap_idx = menu
+            .items()
+            .iter()
+            .position(|item| *item == "Swap with focused pane")
+            .expect("swap item");
+        menu.list.highlighted = swap_idx;
+
+        handle_context_menu_key(
+            &mut app.state,
+            &mut app.terminal_runtimes,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 100, 20));
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert_eq!(app.state.workspaces[0].focused_pane_id(), Some(source));
+        assert_eq!(
+            app.state
+                .view
+                .pane_infos
+                .iter()
+                .find(|info| info.id == source)
+                .unwrap()
+                .rect,
+            target_rect_before
+        );
+        assert_eq!(
+            app.state
+                .view
+                .pane_infos
+                .iter()
+                .find(|info| info.id == target)
+                .unwrap()
+                .rect,
+            source_rect_before
+        );
+    }
+
+    #[tokio::test]
     async fn right_click_passthrough_requires_exact_modifier_match() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("test");
@@ -2148,6 +2251,7 @@ mod tests {
         app.state.active = Some(0);
         app.state.selected = 0;
         app.state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        app.state.toast_config.delay_seconds = 0;
         let target_terminal_id = app.state.workspaces[1]
             .panes
             .get(&target_pane)
@@ -2166,7 +2270,6 @@ mod tests {
                 agent: Some(Agent::Pi),
                 state: AgentState::Idle,
                 visible_blocker: false,
-                visible_idle: false,
                 visible_working: false,
                 process_exited: false,
                 observed_at: std::time::Instant::now(),
@@ -2209,6 +2312,7 @@ mod tests {
             kind: crate::app::state::ToastKind::Finished,
             title: "pi finished".into(),
             context: "background · 2".into(),
+            position: None,
             target: Some(crate::app::state::ToastTarget {
                 workspace_id,
                 pane_id: target_pane,
@@ -2421,6 +2525,7 @@ mod tests {
         assert_eq!(app.state.workspaces[0].display_name(), "a");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn keyboard_context_menu_split_keeps_new_runtime() {
         let mut app = app_for_mouse_test();
@@ -2446,7 +2551,10 @@ mod tests {
         let runtime_count = app.terminal_runtimes.len();
         app.state.context_menu = Some(ContextMenuState {
             kind: ContextMenuKind::Pane {
+                ws_idx: 0,
+                tab_idx: 0,
                 pane_id,
+                source_pane_id: None,
                 has_manual_label: false,
             },
             x: 2,
@@ -2796,6 +2904,37 @@ mod tests {
     }
 
     #[test]
+    fn right_click_inactive_tab_opens_menu_without_switching_tabs() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("one");
+        ws.test_add_tab(Some("two"));
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 106, 20));
+        let second_tab = app.state.view.tab_hit_areas[1];
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Right),
+            second_tab.x + 1,
+            second_tab.y,
+        ));
+
+        assert_eq!(app.state.workspaces[0].active_tab, 0);
+        let menu = app.state.context_menu.as_ref().expect("tab context menu");
+        assert_eq!(
+            menu.kind,
+            ContextMenuKind::Tab {
+                ws_idx: 0,
+                tab_idx: 1
+            }
+        );
+        assert_eq!(app.state.mode, Mode::ContextMenu);
+    }
+
+    #[test]
     fn wheel_over_overflowing_tab_bar_switches_tabs() {
         let mut app = app_for_mouse_test();
         let mut ws = Workspace::test_new("one");
@@ -2993,6 +3132,60 @@ mod tests {
         ));
         assert_eq!(app.state.mode, Mode::RenameTab);
         assert!(app.state.creating_new_tab);
+    }
+
+    #[test]
+    fn mobile_switcher_new_tab_skips_dialog_when_prompt_disabled() {
+        let mut app = app_for_mouse_test();
+        let mut ws = Workspace::test_new("one");
+        ws.test_add_tab(Some("logs"));
+        app.state.workspaces = vec![ws];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.prompt_new_tab_name = false;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 44, 20));
+        let switch = app.state.view.mobile_menu_hit_area;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            switch.x + 1,
+            switch.y + 1,
+        ));
+        let viewport = crate::ui::mobile_switcher_areas(&app.state).viewport;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            viewport.x + 2,
+            viewport.y + 5,
+        ));
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(!app.state.creating_new_tab);
+        assert!(app.state.request_new_tab);
+        assert!(app.state.requested_new_tab_name.is_none());
+    }
+
+    #[test]
+    fn desktop_new_tab_button_skips_dialog_when_prompt_disabled() {
+        let mut app = app_for_mouse_test();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.mode = Mode::Terminal;
+        app.state.prompt_new_tab_name = false;
+
+        crate::ui::compute_view(&mut app.state, Rect::new(0, 0, 120, 40));
+        let new_tab_area = app.state.view.new_tab_hit_area;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            new_tab_area.x + 1,
+            new_tab_area.y,
+        ));
+
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(!app.state.creating_new_tab);
+        assert!(app.state.request_new_tab);
+        assert!(app.state.requested_new_tab_name.is_none());
     }
 
     #[test]

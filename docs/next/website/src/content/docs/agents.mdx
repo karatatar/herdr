@@ -7,39 +7,46 @@ Herdr is built for running more than one coding agent at a time. Each agent stay
 
 ## Supported agents
 
-Automatic detection works out of the box for common coding agents.
+Automatic detection works out of the box for common coding agents. The important difference is not whether Herdr can see an agent. It is which signal is allowed to author `idle`, `working`, and `blocked`.
 
-| Agent | Idle / done | Working | Blocked |
-| --- | --- | --- | --- |
-| Pi | yes | yes | partial |
-| Claude Code | yes | yes | yes |
-| Codex | yes | yes | yes |
-| Droid | yes | yes | yes |
-| Amp | yes | yes | yes |
-| OpenCode | yes | yes | yes |
-| Grok CLI | yes | yes | yes |
-| Hermes Agent | yes | yes | yes |
-| Kilo Code CLI | yes | yes | yes |
-| Cursor Agent | yes | yes | yes |
-| Antigravity CLI | yes | yes | yes |
-| Kimi Code CLI | yes | yes | yes |
-| Kiro CLI | yes | yes | no |
-| GitHub Copilot CLI | yes | yes | yes |
-| Qoder CLI | yes | yes | yes |
+| Agent | State authority | Integration role |
+| --- | --- | --- |
+| Pi | lifecycle hooks when installed; otherwise PTY/screen | state and session |
+| OMP | lifecycle hooks when installed | state |
+| GitHub Copilot CLI | PTY/screen | session |
+| Kimi Code CLI | PTY/screen | session |
+| Hermes Agent | lifecycle hooks when installed; otherwise PTY/screen | state and session |
+| Qoder CLI | PTY/screen | session |
+| Droid | PTY/screen | session |
+| OpenCode | lifecycle plugin when installed; otherwise PTY/screen | state and session |
+| Kilo Code CLI | lifecycle plugin when installed; otherwise PTY/screen | state and session |
+| Claude Code | PTY/screen | session |
+| Codex | PTY/screen | session |
+| Cursor Agent CLI | PTY/screen | session |
+| Amp | PTY/screen | none |
+| Grok CLI | PTY/screen | none |
+| Antigravity CLI | PTY/screen | none |
+| Kiro CLI | PTY/screen | none |
 
-Detected but less thoroughly tested: Gemini CLI and Cline.
+Detected but less thoroughly tested: Gemini CLI and Cline. Unsupported agents still run normally as terminal processes. They just may not get rich state unless you add an integration or report state over the socket API.
 
-Unsupported agents still run normally as terminal processes. They just may not get rich state unless you add an integration or report state over the socket API.
+## Status authority
 
-## How detection works
+Herdr first detects the foreground process in each pane. After that, each pane has one status authority.
 
-Herdr combines three signals:
+For agents with complete lifecycle hooks, the integration is authoritative when it is installed and actively reporting for the running pane. Herdr uses those hook reports for `idle`, `working`, `blocked`, and session identity. It does not also run PTY/screen state fallback for that same lifecycle authority. This avoids two competing sources of truth.
 
-1. foreground process detection
-2. terminal output heuristics
-3. integration session identity or state reports
+For agents without complete lifecycle hooks, Herdr uses PTY-first detection. Terminal render activity means the agent is probably `working`. When the terminal becomes quiet, Herdr reads the recent pane screen and asks one strict question: does the visible agent UI match a known blocked prompt? If yes, the pane is `blocked`. If not, the pane is `idle`.
 
-Process detection tells Herdr which pane owns an agent. Heuristics infer native agent state from terminal screen snapshots. Claude Code, Codex, Droid, and OpenCode integrations provide session identity for restore; Pi, OMP, GitHub Copilot CLI, Kimi Code CLI, Hermes Agent, Qoder CLI, and custom socket integrations can report state when they define state outside the native terminal UI.
+Herdr briefly ignores detection after a new agent process appears, and after input, mouse events, or pane resize. Those events can make a terminal UI redraw even when the agent did not resume work. Once the quiet window passes, normal detection starts again from fresh PTY activity.
+
+Claude Code, Codex, GitHub Copilot CLI, Droid, Kimi Code CLI, Qoder CLI, and Cursor Agent CLI integrations are intentionally not lifecycle authorities. They provide native session identity for restore, but their hooks do not cover the whole lifecycle. They can miss permission approval results, escape interrupts, or other transitions. For those agents, Herdr still uses PTY/screen state detection.
+
+## Blocked state
+
+Blocked detection is deliberately strict for PTY/screen agents. Herdr treats active terminal output as `working`; it only asks whether the agent is blocked after PTY activity becomes quiet. If the screen does not match a known blocked prompt shape, Herdr falls back to `idle`.
+
+This means unusual new agent prompts may initially show as `idle` instead of `blocked` until Herdr learns that screen shape. It also means opening an agent menu, moving a selection, or resizing a pane may delay state changes briefly. Those interactions should not make Herdr send input or take destructive action; they only affect the visible status and waits.
 
 Herdr can run inside tmux as the outer terminal environment. Agent detection does not inspect tmux sessions launched inside a Herdr pane. If a shell framework auto-enters tmux inside Herdr, Herdr sees `tmux` as the pane process instead of the agent behind it.
 
@@ -61,9 +68,11 @@ herdr integration install omp
 herdr integration install claude
 herdr integration install codex
 herdr integration install copilot
+herdr integration install cursor
 herdr integration install droid
 herdr integration install kimi
 herdr integration install opencode
+herdr integration install kilo
 herdr integration install hermes
 herdr integration install qodercli
 ```

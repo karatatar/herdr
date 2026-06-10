@@ -4,7 +4,7 @@ pub(super) fn detect(content: &str) -> AgentState {
     let lower = content.to_lowercase();
 
     // Blocked
-    if has_cursor_blocked_prompt(content, &lower) {
+    if has_visible_blocker(content) {
         return AgentState::Blocked;
     }
 
@@ -19,8 +19,12 @@ pub(super) fn detect(content: &str) -> AgentState {
     AgentState::Idle
 }
 
-fn has_cursor_blocked_prompt(content: &str, lower: &str) -> bool {
-    if lower.contains("waiting for approval") || lower.contains("run this command?") {
+pub(super) fn has_visible_blocker(content: &str) -> bool {
+    let lower = content.to_lowercase();
+    if lower.contains("waiting for approval")
+        && lower.contains("run this command?")
+        && (lower.contains("run (once) (y)") || lower.contains("skip (esc or n)"))
+    {
         return true;
     }
 

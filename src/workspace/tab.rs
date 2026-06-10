@@ -198,6 +198,31 @@ impl Tab {
     ) -> std::io::Result<NewPane> {
         self.split_focused_with_runtime(
             direction,
+            None,
+            rows,
+            cols,
+            cwd,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            shell_config,
+            None,
+        )
+    }
+
+    pub fn split_focused_with_ratio(
+        &mut self,
+        direction: Direction,
+        ratio: f32,
+        rows: u16,
+        cols: u16,
+        cwd: Option<PathBuf>,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        shell_config: crate::pane::PaneShellConfig<'_>,
+    ) -> std::io::Result<NewPane> {
+        self.split_focused_with_runtime(
+            direction,
+            Some(ratio),
             rows,
             cols,
             cwd,
@@ -221,6 +246,7 @@ impl Tab {
     ) -> std::io::Result<NewPane> {
         self.split_focused_with_runtime(
             direction,
+            None,
             rows,
             cols,
             cwd,
@@ -243,6 +269,7 @@ impl Tab {
     ) -> std::io::Result<NewPane> {
         self.split_focused_with_runtime(
             direction,
+            None,
             rows,
             cols,
             cwd,
@@ -256,6 +283,7 @@ impl Tab {
     fn split_focused_with_runtime(
         &mut self,
         direction: Direction,
+        ratio: Option<f32>,
         rows: u16,
         cols: u16,
         cwd: Option<PathBuf>,
@@ -265,7 +293,10 @@ impl Tab {
         command: Option<SplitCommand<'_>>,
     ) -> std::io::Result<NewPane> {
         let previous_focus = self.layout.focused();
-        let new_id = self.layout.split_focused(direction);
+        let new_id = match ratio {
+            Some(ratio) => self.layout.split_focused_with_ratio(direction, ratio),
+            None => self.layout.split_focused(direction),
+        };
         let actual_cwd =
             cwd.unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| "/".into()));
         let launch_argv = if let Some(SplitCommand::Argv { argv }) = &command {

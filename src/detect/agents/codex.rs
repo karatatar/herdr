@@ -1,26 +1,21 @@
 use super::super::{has_confirmation_prompt, has_interrupt_pattern, AgentState};
 
 pub(super) fn detect(content: &str) -> AgentState {
-    let lower = content.to_lowercase();
-
     // Strong blocked patterns are structural Codex UI chrome, so they can win
     // even when the prompt region is visible.
-    if has_codex_strong_blocked_prompt(&lower) {
+    if has_codex_strong_blocked_prompt(content) {
         return AgentState::Blocked;
     }
+
+    let lower = content.to_lowercase();
 
     // Working
     if has_codex_working_status_at_current_prompt(content) {
         return AgentState::Working;
     }
 
-    // Idle
-    if has_codex_current_prompt(content) {
-        return AgentState::Idle;
-    }
-
-    // Weak blocked patterns are too broad to scan above a visible prompt. They
-    // only apply when Codex does not currently show an idle prompt region.
+    // Weak blocked patterns are too broad to become visible blockers, but the
+    // legacy state detector still reports them as blocked for compatibility.
     if has_codex_weak_blocked_prompt(&lower) {
         return AgentState::Blocked;
     }
@@ -35,12 +30,7 @@ pub(super) fn detect(content: &str) -> AgentState {
 }
 
 pub(super) fn has_visible_blocker(content: &str) -> bool {
-    let lower = content.to_lowercase();
-    has_codex_strong_blocked_prompt(&lower)
-}
-
-pub(super) fn has_prompt(content: &str) -> bool {
-    has_codex_current_prompt(content) || content.lines().any(codex_prompt_line)
+    has_codex_strong_blocked_prompt(content)
 }
 
 pub(super) fn has_visible_working(content: &str) -> bool {
@@ -84,7 +74,15 @@ fn has_codex_visible_working_without_prompt(content: &str) -> bool {
             .is_some_and(codex_live_working_line)
 }
 
-fn has_codex_strong_blocked_prompt(lower_content: &str) -> bool {
+fn has_codex_strong_blocked_prompt(content: &str) -> bool {
+    let lines: Vec<&str> = content.lines().collect();
+    let live_region = lines
+        .iter()
+        .rposition(|line| codex_prompt_line(line))
+        .map(|prompt_index| lines[prompt_index + 1..].join("\n"))
+        .unwrap_or_else(|| content.to_string());
+    let lower_content = live_region.to_lowercase();
+
     lower_content.contains("press enter to confirm or esc to cancel")
         || lower_content.contains("enter to submit answer")
         || lower_content.contains("enter to submit all")
@@ -128,8 +126,7 @@ fn codex_live_working_line(line: &str) -> bool {
     let lower = trimmed.to_lowercase();
     codex_working_status_line(line)
         && (trimmed.contains("Waiting for background terminal")
-            || lower.contains("esc to interrupt")
-            || lower.contains("esc…")
+            || has_codex_status_interrupt_hint(&lower)
             || lower.contains("background terminal running")
             || lower.contains("/ps to view")
             || lower.contains("/stop to close"))
@@ -145,9 +142,50 @@ fn codex_working_status_line(line: &str) -> bool {
     trimmed.starts_with('•')
         && (trimmed.contains("Working (")
             || trimmed.contains("Waiting for background terminal (")
+            || has_codex_status_interrupt_hint(&lower)
             || lower.contains("reviewing approval request (")
             || (lower.contains("reviewing ") && lower.contains(" approval requests ("))
             || trimmed.contains("Booting MCP server:"))
+}
+
+fn has_codex_status_interrupt_hint(lower_line: &str) -> bool {
+    let Some((before_escape, after_escape)) = lower_line.split_once(" • esc") else {
+        return false;
+    };
+
+    has_codex_status_elapsed(before_escape) && has_codex_status_escape_suffix(after_escape)
+}
+
+fn has_codex_status_elapsed(before_escape: &str) -> bool {
+    let Some((_, elapsed)) = before_escape.rsplit_once('(') else {
+        return false;
+    };
+
+    let parts: Vec<&str> = elapsed.split_whitespace().collect();
+    (1..=3).contains(&parts.len())
+        && parts.iter().all(|part| {
+            part.len() >= 2
+                && matches!(part.as_bytes().last(), Some(b'h' | b'm' | b's'))
+                && part[..part.len() - 1].chars().all(|ch| ch.is_ascii_digit())
+        })
+}
+
+fn has_codex_status_escape_suffix(after_escape: &str) -> bool {
+    let suffix = after_escape.trim_start();
+    if suffix.starts_with('…') || suffix.starts_with("to interrupt") {
+        return true;
+    }
+
+    let Some(rest) = suffix.strip_prefix("to ") else {
+        return false;
+    };
+    if rest.starts_with('…') {
+        return true;
+    }
+
+    rest.split_once('…')
+        .map(|(fragment, _)| !fragment.is_empty() && "interrupt".starts_with(fragment.trim_end()))
+        .unwrap_or(false)
 }
 
 fn has_codex_current_prompt(content: &str) -> bool {

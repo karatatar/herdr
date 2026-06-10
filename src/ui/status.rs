@@ -9,10 +9,16 @@ use ratatui::{
 use super::widgets::panel_contrast_fg;
 use crate::{
     app::state::{CopyFeedback, Palette, ToastKind, ToastNotification},
+    config::{ToastClipboardPosition, ToastHerdrPosition},
     detect::AgentState,
 };
 
-pub(crate) fn copy_feedback_rect(area: Rect, feedback: &CopyFeedback, offset_rows: u16) -> Rect {
+pub(crate) fn copy_feedback_rect(
+    area: Rect,
+    feedback: &CopyFeedback,
+    offset_rows: u16,
+    position: ToastClipboardPosition,
+) -> Rect {
     if area.width == 0 || area.height == 0 {
         return Rect::default();
     }
@@ -20,8 +26,25 @@ pub(crate) fn copy_feedback_rect(area: Rect, feedback: &CopyFeedback, offset_row
     let content_width = feedback.message.len() as u16 + 4;
     let width = content_width.min(area.width);
     let height = 3u16.min(area.height);
-    let x = area.x + area.width.saturating_sub(width) / 2;
-    let y = area.y + area.height.saturating_sub(height + offset_rows);
+    let x = match position {
+        ToastClipboardPosition::TopLeft | ToastClipboardPosition::BottomLeft => area.x,
+        ToastClipboardPosition::TopCenter | ToastClipboardPosition::BottomCenter => {
+            area.x + area.width.saturating_sub(width) / 2
+        }
+        ToastClipboardPosition::TopRight | ToastClipboardPosition::BottomRight => {
+            area.x + area.width.saturating_sub(width)
+        }
+    };
+    let y = match position {
+        ToastClipboardPosition::TopLeft
+        | ToastClipboardPosition::TopCenter
+        | ToastClipboardPosition::TopRight => area.y + offset_rows.min(area.height),
+        ToastClipboardPosition::BottomLeft
+        | ToastClipboardPosition::BottomCenter
+        | ToastClipboardPosition::BottomRight => {
+            area.y + area.height.saturating_sub(height + offset_rows)
+        }
+    };
     Rect::new(x, y, width, height)
 }
 
@@ -29,16 +52,27 @@ pub(crate) fn toast_notification_rect(
     area: Rect,
     toast: &ToastNotification,
     offset_for_warning: bool,
+    position: ToastHerdrPosition,
 ) -> Rect {
     let content_width = (toast.title.len().max(toast.context.len()) as u16) + 4;
     let width = content_width.saturating_add(2).min(area.width);
     let content_height = if toast.context.is_empty() { 1 } else { 2 };
     let height = (content_height + 2).min(area.height);
-    let x = area.x + area.width.saturating_sub(width);
-    let y = area.y
-        + area
-            .height
-            .saturating_sub(height + if offset_for_warning { 1 } else { 0 });
+    let x = match position {
+        ToastHerdrPosition::TopLeft | ToastHerdrPosition::BottomLeft => area.x,
+        ToastHerdrPosition::TopRight | ToastHerdrPosition::BottomRight => {
+            area.x + area.width.saturating_sub(width)
+        }
+    };
+    let warning_offset = u16::from(offset_for_warning);
+    let y = match position {
+        ToastHerdrPosition::TopLeft | ToastHerdrPosition::TopRight => {
+            area.y + warning_offset.min(area.height)
+        }
+        ToastHerdrPosition::BottomLeft | ToastHerdrPosition::BottomRight => {
+            area.y + area.height.saturating_sub(height + warning_offset)
+        }
+    };
     Rect::new(x, y, width, height)
 }
 
@@ -47,6 +81,7 @@ pub(super) fn render_toast_notification(
     area: Rect,
     toast: &ToastNotification,
     offset_for_warning: bool,
+    position: ToastHerdrPosition,
     p: &Palette,
 ) {
     let dot_color = match toast.kind {
@@ -54,7 +89,7 @@ pub(super) fn render_toast_notification(
         ToastKind::Finished => p.blue,
         ToastKind::UpdateInstalled => p.accent,
     };
-    let toast_area = toast_notification_rect(area, toast, offset_for_warning);
+    let toast_area = toast_notification_rect(area, toast, offset_for_warning, position);
 
     frame.render_widget(Clear, toast_area);
     let block = Block::default()
@@ -95,9 +130,10 @@ pub(super) fn render_copy_feedback(
     area: Rect,
     feedback: &CopyFeedback,
     offset_rows: u16,
+    position: ToastClipboardPosition,
     p: &Palette,
 ) {
-    let feedback_area = copy_feedback_rect(area, feedback, offset_rows);
+    let feedback_area = copy_feedback_rect(area, feedback, offset_rows, position);
     if feedback_area.is_empty() {
         return;
     }
@@ -196,5 +232,72 @@ pub(super) fn state_label_color(state: AgentState, seen: bool, p: &Palette) -> C
         (AgentState::Idle, false) => p.teal,
         (AgentState::Idle, true) => p.green,
         (AgentState::Unknown, _) => p.overlay0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ToastClipboardPosition, ToastHerdrPosition};
+
+    fn toast() -> ToastNotification {
+        ToastNotification {
+            kind: ToastKind::Finished,
+            title: "done".to_string(),
+            context: "workspace".to_string(),
+            position: None,
+            target: None,
+        }
+    }
+
+    fn feedback() -> CopyFeedback {
+        CopyFeedback {
+            message: "copied to clipboard".to_string(),
+        }
+    }
+
+    #[test]
+    fn toast_rect_uses_configured_corner() {
+        let area = Rect::new(10, 20, 100, 40);
+        let toast = toast();
+
+        let top_left = toast_notification_rect(area, &toast, false, ToastHerdrPosition::TopLeft);
+        assert_eq!(top_left.x, area.x);
+        assert_eq!(top_left.y, area.y);
+
+        let top_right = toast_notification_rect(area, &toast, false, ToastHerdrPosition::TopRight);
+        assert_eq!(top_right.x + top_right.width, area.x + area.width);
+        assert_eq!(top_right.y, area.y);
+
+        let bottom_left =
+            toast_notification_rect(area, &toast, false, ToastHerdrPosition::BottomLeft);
+        assert_eq!(bottom_left.x, area.x);
+        assert_eq!(bottom_left.y + bottom_left.height, area.y + area.height);
+
+        let bottom_right =
+            toast_notification_rect(area, &toast, false, ToastHerdrPosition::BottomRight);
+        assert_eq!(bottom_right.x + bottom_right.width, area.x + area.width);
+        assert_eq!(bottom_right.y + bottom_right.height, area.y + area.height);
+    }
+
+    #[test]
+    fn copy_feedback_rect_uses_configured_position() {
+        let area = Rect::new(10, 20, 100, 40);
+        let feedback = feedback();
+
+        let top_center = copy_feedback_rect(area, &feedback, 0, ToastClipboardPosition::TopCenter);
+        assert_eq!(top_center.y, area.y);
+        assert_eq!(
+            top_center.x,
+            area.x + area.width.saturating_sub(top_center.width) / 2
+        );
+
+        let bottom_center =
+            copy_feedback_rect(area, &feedback, 0, ToastClipboardPosition::BottomCenter);
+        assert_eq!(bottom_center.y + bottom_center.height, area.y + area.height);
+        assert_eq!(
+            bottom_center.x,
+            area.x + area.width.saturating_sub(bottom_center.width) / 2
+        );
     }
 }

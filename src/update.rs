@@ -8,13 +8,19 @@
 
 use std::collections::BTreeMap;
 use std::env;
+#[cfg(not(windows))]
 use std::fs;
-use std::io::{self, BufRead, BufReader, IsTerminal, Write};
-use std::os::unix::net::UnixStream;
+#[cfg(not(windows))]
+use std::io;
+#[cfg(not(windows))]
+use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(not(windows))]
 use std::time::{Duration, Instant};
 
+#[cfg(not(windows))]
+use interprocess::local_socket::traits::Stream as _;
 use serde::{Deserialize, Deserializer};
 
 const STABLE_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/latest.json";
@@ -28,9 +34,13 @@ const MISE_INSTALLS_DIR_ENV: &str = "MISE_INSTALLS_DIR";
 const FAKE_UPDATE_VERSION_ENV: &str = "HERDR_FAKE_UPDATE_VERSION";
 const FAKE_UPDATE_NOTES_VERSION_ENV: &str = "HERDR_FAKE_UPDATE_NOTES_VERSION";
 const DEFAULT_FAKE_UPDATE_NOTES_VERSION: &str = "0.3.0";
+#[cfg(not(windows))]
 const SERVER_STOP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(not(windows))]
 const SERVER_HANDOFF_REQUEST_TIMEOUT: Duration = Duration::from_secs(240);
+#[cfg(not(windows))]
 const SERVER_HANDOFF_CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(not(windows))]
 const SERVER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 fn fake_release_notes_body(version: &str) -> String {
     let notes_version = env::var(FAKE_UPDATE_NOTES_VERSION_ENV)
@@ -155,6 +165,7 @@ impl<'de> Deserialize<'de> for AssetRef {
 struct UpdateManifest {
     version: String,
     /// Thin-client protocol spoken by this release, when advertised by the manifest.
+    #[cfg(not(windows))]
     protocol: Option<u32>,
     notes: String,
     assets: BTreeMap<String, AssetRef>,
@@ -216,7 +227,7 @@ struct HomebrewFormulaVersions {
 }
 
 impl UpdateManifest {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn download_url_for(&self, os: &str, arch: &str) -> Option<String> {
         self.assets
             .get(&format!("{os}-{arch}"))
@@ -258,6 +269,7 @@ struct ReleaseInfo {
     channel: UpdateChannel,
     build_id: Option<String>,
     commit: Option<String>,
+    #[cfg(not(windows))]
     target_protocol: Option<u32>,
     download_url: String,
     sha256: Option<String>,
@@ -357,6 +369,7 @@ fn release_info_from_manifest(manifest: &UpdateManifest) -> Result<Option<Releas
         channel: UpdateChannel::Stable,
         build_id: None,
         commit: None,
+        #[cfg(not(windows))]
         target_protocol: manifest.protocol,
         download_url,
         sha256: asset.sha256.clone(),
@@ -441,6 +454,7 @@ fn release_info_from_preview_manifest(
         channel: UpdateChannel::Preview,
         build_id: Some(build_id.to_string()),
         commit: Some(manifest.commit.clone()),
+        #[cfg(not(windows))]
         target_protocol: Some(manifest.protocol),
         download_url,
         sha256: asset.sha256.clone(),
@@ -519,11 +533,13 @@ fn check_homebrew_latest() -> Result<Option<Version>, String> {
 // Download + install
 // ---------------------------------------------------------------------------
 
+#[cfg(not(windows))]
 struct DownloadedUpdate {
     current_exe: PathBuf,
     tmp_path: Option<PathBuf>,
 }
 
+#[cfg(not(windows))]
 impl Drop for DownloadedUpdate {
     fn drop(&mut self) {
         if let Some(tmp_path) = self.tmp_path.take() {
@@ -533,6 +549,7 @@ impl Drop for DownloadedUpdate {
 }
 
 /// Download a release to a prepared executable temp file without touching the running server.
+#[cfg(not(windows))]
 fn download_update(release: &ReleaseInfo) -> Result<DownloadedUpdate, String> {
     let current_exe = env::current_exe().map_err(|e| format!("can't find current binary: {e}"))?;
 
@@ -592,6 +609,7 @@ fn download_update(release: &ReleaseInfo) -> Result<DownloadedUpdate, String> {
     })
 }
 
+#[cfg(not(windows))]
 fn install_downloaded_update(mut update: DownloadedUpdate) -> Result<(), String> {
     let tmp_path = update
         .tmp_path
@@ -609,6 +627,42 @@ fn install_downloaded_update(mut update: DownloadedUpdate) -> Result<(), String>
     Ok(())
 }
 
+#[cfg(windows)]
+fn install_windows_update_with_installer(channel: UpdateChannel) -> Result<(), String> {
+    let status = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            "irm https://herdr.dev/install.ps1 | iex",
+        ])
+        .env("HERDR_CHANNEL", channel.as_str())
+        .status()
+        .map_err(|err| format!("failed to run Windows installer: {err}"))?;
+
+    if !status.success() {
+        return Err(format!("Windows installer failed with status {status}"));
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_installed_herdr_exe_path() -> Result<PathBuf, String> {
+    if let Some(install_dir) = env::var_os("HERDR_INSTALL_DIR").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(install_dir).join("herdr.exe"));
+    }
+
+    let local_app_data = env::var_os("LOCALAPPDATA")
+        .ok_or("LOCALAPPDATA is not set; cannot locate Herdr install")?;
+    Ok(PathBuf::from(local_app_data)
+        .join("Programs")
+        .join("Herdr")
+        .join("bin")
+        .join("herdr.exe"))
+}
+
 // ---------------------------------------------------------------------------
 // Upgrade flow helpers
 // ---------------------------------------------------------------------------
@@ -621,22 +675,26 @@ fn running_inside_herdr() -> bool {
     running_inside_herdr_env(env::var(crate::HERDR_ENV_VAR).ok().as_deref())
 }
 
+#[cfg(not(windows))]
 fn client_protocol_server_is_running_at(socket_path: &Path) -> bool {
     if !socket_path.exists() {
         return false;
     }
 
-    UnixStream::connect(socket_path).is_ok()
+    crate::ipc::connect_local_stream(socket_path).is_ok()
 }
 
+#[cfg(not(windows))]
 fn client_protocol_server_is_running() -> bool {
     client_protocol_server_is_running_at(&crate::server::socket_paths::client_socket_path())
 }
 
+#[cfg(not(windows))]
 fn version_label(version: Option<&str>) -> &str {
     version.unwrap_or("unknown")
 }
 
+#[cfg(not(windows))]
 fn update_requires_server_restart(
     server: &crate::api::RuntimeStatus,
     release: &ReleaseInfo,
@@ -647,6 +705,7 @@ fn update_requires_server_restart(
     }
 }
 
+#[cfg(not(windows))]
 fn server_supports_live_handoff(server: &crate::api::RuntimeStatus) -> bool {
     server
         .capabilities
@@ -654,6 +713,7 @@ fn server_supports_live_handoff(server: &crate::api::RuntimeStatus) -> bool {
         .is_some_and(|capabilities| capabilities.live_handoff)
 }
 
+#[cfg(not(windows))]
 fn parse_stop_old_servers_after_update_response(input: &str, default_yes: bool) -> Option<bool> {
     let trimmed = input.trim().to_ascii_lowercase();
     match trimmed.as_str() {
@@ -665,12 +725,14 @@ fn parse_stop_old_servers_after_update_response(input: &str, default_yes: bool) 
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(not(windows))]
 struct RunningServerUpdatePlan {
     target: RunningUpdateTarget,
     server: crate::api::RuntimeStatus,
     requires_server_restart: bool,
 }
 
+#[cfg(not(windows))]
 impl RunningServerUpdatePlan {
     fn label(&self) -> &str {
         &self.target.label
@@ -698,12 +760,14 @@ impl RunningServerUpdatePlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(not(windows))]
 struct RunningServerUpdateDecision {
     plan: RunningServerUpdatePlan,
     action: RunningServerUpdateAction,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(not(windows))]
 enum RunningServerUpdateAction {
     None,
     LiveHandoff,
@@ -711,6 +775,7 @@ enum RunningServerUpdateAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(not(windows))]
 enum RunningServerUpdateOutcome {
     RestartDeferred,
     Stopped,
@@ -722,6 +787,7 @@ enum RunningServerUpdateOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(not(windows))]
 struct RunningSessionUpdateOutcome {
     session_label: String,
     target_noun: &'static str,
@@ -732,6 +798,7 @@ struct RunningSessionUpdateOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(not(windows))]
 enum FailedHandoffServerState {
     UpdatedServerRunning,
     OldServerRunning(crate::api::RuntimeStatus),
@@ -739,6 +806,7 @@ enum FailedHandoffServerState {
     Unknown(String),
 }
 
+#[cfg(not(windows))]
 fn plan_running_server_updates(
     release: &ReleaseInfo,
 ) -> Result<Vec<RunningServerUpdatePlan>, String> {
@@ -796,6 +864,7 @@ fn plan_running_server_updates(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(not(windows))]
 struct RunningUpdateTarget {
     name: Option<String>,
     label: String,
@@ -806,6 +875,7 @@ struct RunningUpdateTarget {
     must_be_running: bool,
 }
 
+#[cfg(not(windows))]
 fn running_update_targets() -> Result<Vec<RunningUpdateTarget>, String> {
     if crate::session::explicit_session_requested() {
         return Ok(vec![RunningUpdateTarget {
@@ -872,6 +942,7 @@ fn running_update_targets() -> Result<Vec<RunningUpdateTarget>, String> {
         .collect())
 }
 
+#[cfg(not(windows))]
 fn target_client_protocol_server_is_running() -> Result<bool, String> {
     if crate::session::explicit_session_requested()
         || std::env::var_os(crate::api::SOCKET_PATH_ENV_VAR).is_some()
@@ -910,6 +981,7 @@ pub(crate) fn parse_self_update_args(args: &[String]) -> Result<SelfUpdateOption
     Ok(options)
 }
 
+#[cfg(not(windows))]
 fn prompt_to_stop_old_servers_before_update(
     plans: &[RunningServerUpdatePlan],
     release: &ReleaseInfo,
@@ -958,6 +1030,7 @@ fn prompt_to_stop_old_servers_before_update(
     }
 }
 
+#[cfg(not(windows))]
 fn confirm_running_server_update_action(
     plans: Vec<RunningServerUpdatePlan>,
     release: &ReleaseInfo,
@@ -1012,6 +1085,7 @@ fn confirm_running_server_update_action(
     Ok(decisions)
 }
 
+#[cfg(not(windows))]
 fn target_group_nouns(plans: &[&RunningServerUpdatePlan]) -> (&'static str, &'static str) {
     let all_sessions = plans.iter().all(|plan| plan.target_noun() == "session");
     let all_servers = plans.iter().all(|plan| plan.target_noun() == "server");
@@ -1024,6 +1098,7 @@ fn target_group_nouns(plans: &[&RunningServerUpdatePlan]) -> (&'static str, &'st
     }
 }
 
+#[cfg(not(windows))]
 fn prompt_to_complete_plain_update(
     decisions: &[RunningServerUpdateDecision],
     release: &ReleaseInfo,
@@ -1080,6 +1155,7 @@ fn prompt_to_complete_plain_update(
     }
 }
 
+#[cfg(not(windows))]
 fn mark_plain_update_stop_decisions(
     decisions: Vec<RunningServerUpdateDecision>,
 ) -> Vec<RunningServerUpdateDecision> {
@@ -1092,6 +1168,7 @@ fn mark_plain_update_stop_decisions(
         .collect()
 }
 
+#[cfg(not(windows))]
 fn print_running_session_update_summary(
     plans: &[RunningServerUpdatePlan],
     release: &ReleaseInfo,
@@ -1123,6 +1200,7 @@ fn print_running_session_update_summary(
     eprintln!();
 }
 
+#[cfg(not(windows))]
 fn live_handoff_running_server_for_update(
     plan: &RunningServerUpdatePlan,
     release: &ReleaseInfo,
@@ -1143,6 +1221,7 @@ fn live_handoff_running_server_for_update(
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn runtime_matches_release(status: &crate::api::RuntimeStatus, release: &ReleaseInfo) -> bool {
     let protocol_matches = release
         .target_protocol
@@ -1151,6 +1230,7 @@ fn runtime_matches_release(status: &crate::api::RuntimeStatus, release: &Release
     protocol_matches && version_matches
 }
 
+#[cfg(not(windows))]
 fn classify_failed_live_handoff_state_at(
     socket_path: &Path,
     release: &ReleaseInfo,
@@ -1165,6 +1245,7 @@ fn classify_failed_live_handoff_state_at(
     }
 }
 
+#[cfg(not(windows))]
 fn prompt_to_stop_old_server_after_failed_handoff(
     plan: &RunningServerUpdatePlan,
     release: &ReleaseInfo,
@@ -1213,6 +1294,7 @@ fn prompt_to_stop_old_server_after_failed_handoff(
     }
 }
 
+#[cfg(not(windows))]
 fn recover_failed_live_handoff_for_update(
     plan: &RunningServerUpdatePlan,
     release: &ReleaseInfo,
@@ -1269,6 +1351,7 @@ fn recover_failed_live_handoff_for_update(
     }
 }
 
+#[cfg(not(windows))]
 fn reconnect_or_stop_guidance(plan: &RunningServerUpdatePlan) -> String {
     if let Some(command) = plan.attach_command() {
         format!(
@@ -1283,6 +1366,7 @@ fn reconnect_or_stop_guidance(plan: &RunningServerUpdatePlan) -> String {
     }
 }
 
+#[cfg(not(windows))]
 fn stop_server_via_api_at(socket_path: &Path, timeout: Duration) -> Result<(), String> {
     use crate::api::schema::{EmptyParams, Method};
 
@@ -1295,6 +1379,7 @@ fn stop_server_via_api_at(socket_path: &Path, timeout: Duration) -> Result<(), S
     )
 }
 
+#[cfg(not(windows))]
 fn send_server_update_method_at(
     socket_path: &Path,
     timeout: Duration,
@@ -1309,13 +1394,13 @@ fn send_server_update_method_at(
         method,
     };
 
-    let mut stream = UnixStream::connect(socket_path)
+    let mut stream = crate::ipc::connect_local_stream(socket_path)
         .map_err(|e| format!("failed to connect to running server: {e}"))?;
     stream
-        .set_write_timeout(Some(timeout))
+        .set_send_timeout(Some(timeout))
         .map_err(|e| format!("failed to set {error_prefix} write timeout: {e}"))?;
     stream
-        .set_read_timeout(Some(timeout))
+        .set_recv_timeout(Some(timeout))
         .map_err(|e| format!("failed to set {error_prefix} read timeout: {e}"))?;
     stream
         .write_all(
@@ -1348,7 +1433,7 @@ fn send_server_update_method_at(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn live_handoff_server_via_api_at(socket_path: &Path, timeout: Duration) -> Result<(), String> {
     use crate::api::schema::{Method, ServerLiveHandoffParams};
 
@@ -1363,6 +1448,7 @@ fn live_handoff_server_via_api_at(socket_path: &Path, timeout: Duration) -> Resu
     )
 }
 
+#[cfg(not(windows))]
 fn live_handoff_server_via_api_for_release_at(
     socket_path: &Path,
     timeout: Duration,
@@ -1386,6 +1472,7 @@ fn live_handoff_server_via_api_for_release_at(
     )
 }
 
+#[cfg(not(windows))]
 fn live_handoff_server_via_api_for_update_at(
     socket_path: &Path,
     updated_exe: &Path,
@@ -1399,12 +1486,13 @@ fn live_handoff_server_via_api_for_update_at(
     )
 }
 
+#[cfg(not(windows))]
 fn server_shutdown_confirmed_at(socket_path: &Path) -> Result<bool, String> {
     if !socket_path.exists() {
         return Ok(true);
     }
 
-    match UnixStream::connect(socket_path) {
+    match crate::ipc::connect_local_stream(socket_path) {
         Ok(_) => Ok(false),
         Err(err)
             if matches!(
@@ -1423,6 +1511,7 @@ fn server_shutdown_confirmed_at(socket_path: &Path) -> Result<bool, String> {
     }
 }
 
+#[cfg(not(windows))]
 fn wait_for_server_shutdown_at(socket_path: &Path, timeout: Duration) -> Result<(), String> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -1440,6 +1529,7 @@ fn wait_for_server_shutdown_at(socket_path: &Path, timeout: Duration) -> Result<
     }
 }
 
+#[cfg(not(windows))]
 fn stop_running_server_for_update(plan: &RunningServerUpdatePlan) -> Result<(), String> {
     eprintln!("stopping herdr {} {}...", plan.target_noun(), plan.label());
     stop_server_via_api_at(plan.socket_path(), SERVER_STOP_RESPONSE_TIMEOUT)?;
@@ -1447,6 +1537,7 @@ fn stop_running_server_for_update(plan: &RunningServerUpdatePlan) -> Result<(), 
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn wait_for_server_handoff_at(
     socket_path: &Path,
     timeout: Duration,
@@ -1460,6 +1551,7 @@ fn wait_for_server_handoff_at(
     )
 }
 
+#[cfg(not(windows))]
 fn wait_for_running_server_protocol_at(
     socket_path: &Path,
     timeout: Duration,
@@ -1491,6 +1583,7 @@ fn wait_for_running_server_protocol_at(
     }
 }
 
+#[cfg(not(windows))]
 fn apply_running_session_update_decisions(
     release: &ReleaseInfo,
     updated_exe: &Path,
@@ -1529,6 +1622,7 @@ fn apply_running_session_update_decisions(
     Ok(outcomes)
 }
 
+#[cfg(not(windows))]
 fn print_running_session_update_outcomes(
     outcomes: &[RunningSessionUpdateOutcome],
     release: &ReleaseInfo,
@@ -1715,6 +1809,7 @@ fn preview_channel_rejection_for_exe_path(path: &Path) -> Option<&'static str> {
     }
 }
 
+#[cfg(unix)]
 pub(crate) fn is_package_manager_managed_exe_path(path: &Path) -> bool {
     is_homebrew_managed_exe_path_following_links(path)
         || is_mise_managed_exe_path_following_links(path)
@@ -1844,6 +1939,13 @@ fn homebrew_cellar_keg_root(path: &Path) -> Option<PathBuf> {
 /// Manual self-update command (`herdr update`).
 pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
     let channel = UpdateChannel::configured();
+    #[cfg(windows)]
+    if channel == UpdateChannel::Stable {
+        return Err(
+            "Windows builds are preview-only for now; run `herdr channel set preview`".into(),
+        );
+    }
+
     if is_homebrew_managed_install() {
         if channel == UpdateChannel::Preview {
             return Err(
@@ -1893,39 +1995,67 @@ pub fn self_update(options: SelfUpdateOptions) -> Result<Version, String> {
         }
     };
 
-    let running_server_plans = plan_running_server_updates(&release)?;
-    let server_update_decisions =
-        confirm_running_server_update_action(running_server_plans, &release, options)?;
-
     if let Some(commit) = &release.commit {
         tracing::info!(commit = %commit, build_id = ?release.build_id, "selected preview update build");
     }
-    eprintln!("downloading {}...", release.label());
     if let Err(e) = crate::release_notes::save_pending(release.label(), &release.notes_body) {
         tracing::warn!("failed to save pending release notes: {e}");
     }
-    let downloaded_update = download_update(&release)?;
-    let updated_exe = downloaded_update.current_exe.clone();
-    eprintln!("downloaded {}", release.label());
-    if !options.live_handoff
-        && !prompt_to_complete_plain_update(&server_update_decisions, &release)?
-    {
-        eprintln!("Herdr was not updated.");
-        eprintln!("Stop running Herdr sessions when ready, then run `herdr update` again.");
-        return Ok(current);
-    }
-    install_downloaded_update(downloaded_update)?;
-    eprintln!("installed {}", release.label());
-    let server_update_decisions = if options.live_handoff {
-        server_update_decisions
-    } else {
-        mark_plain_update_stop_decisions(server_update_decisions)
-    };
-    let server_update_outcomes =
-        apply_running_session_update_decisions(&release, &updated_exe, server_update_decisions)?;
-    print_outdated_integration_notice_with_updated_binary(&updated_exe);
 
-    print_running_session_update_outcomes(&server_update_outcomes, &release);
+    #[cfg(windows)]
+    {
+        let _ = options;
+
+        eprintln!(
+            "installing {} with the Windows installer...",
+            release.label()
+        );
+        if let Some(sha256) = &release.sha256 {
+            tracing::debug!(sha256 = %sha256, "selected Windows update asset has checksum");
+        }
+        install_windows_update_with_installer(channel)?;
+        let updated_exe = windows_installed_herdr_exe_path()?;
+        eprintln!("installed {}", release.label());
+        print_outdated_integration_notice_with_updated_binary(&updated_exe);
+        eprintln!(
+            "Restart any running Herdr sessions to use {}.",
+            release.label()
+        );
+    }
+
+    #[cfg(not(windows))]
+    {
+        let running_server_plans = plan_running_server_updates(&release)?;
+        let server_update_decisions =
+            confirm_running_server_update_action(running_server_plans, &release, options)?;
+
+        eprintln!("downloading {}...", release.label());
+        let downloaded_update = download_update(&release)?;
+        let updated_exe = downloaded_update.current_exe.clone();
+        eprintln!("downloaded {}", release.label());
+        if !options.live_handoff
+            && !prompt_to_complete_plain_update(&server_update_decisions, &release)?
+        {
+            eprintln!("Herdr was not updated.");
+            eprintln!("Stop running Herdr sessions when ready, then run `herdr update` again.");
+            return Ok(current);
+        }
+        install_downloaded_update(downloaded_update)?;
+        eprintln!("installed {}", release.label());
+        let server_update_decisions = if options.live_handoff {
+            server_update_decisions
+        } else {
+            mark_plain_update_stop_decisions(server_update_decisions)
+        };
+        let server_update_outcomes = apply_running_session_update_decisions(
+            &release,
+            &updated_exe,
+            server_update_decisions,
+        )?;
+        print_outdated_integration_notice_with_updated_binary(&updated_exe);
+
+        print_running_session_update_outcomes(&server_update_outcomes, &release);
+    }
 
     Ok(release.version)
 }
@@ -2076,6 +2206,8 @@ fn platform_target() -> (&'static str, &'static str) {
         "linux"
     } else if cfg!(target_os = "macos") {
         "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
     } else {
         "unknown"
     };
@@ -2095,7 +2227,7 @@ fn platform_target() -> (&'static str, &'static str) {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;

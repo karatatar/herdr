@@ -16,25 +16,33 @@ mod input;
 
 use std::collections::HashSet;
 use std::io::{self, Write as _};
-use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+#[cfg(windows)]
+use std::time::Instant;
 
 use crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-    EnableFocusChange, EnableMouseCapture, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    EnableFocusChange, EnableMouseCapture,
 };
+#[cfg(unix)]
+use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
+#[cfg(not(windows))]
+use crossterm::event::{PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
 use crossterm::execute;
+use interprocess::local_socket::traits::Stream as _;
+use interprocess::TryClone as _;
 use tracing::{debug, info, warn};
 
+use crate::ipc::LocalStream;
 use crate::protocol::render_ansi;
 use crate::protocol::{
-    self, AttachScrollDirection, AttachScrollSource, ClientKeybindings, ClientLaunchMode,
-    ClientMessage, NotifyKind, RenderEncoding, ServerMessage, MAX_CLIPBOARD_IMAGE_PAYLOAD,
-    MAX_FRAME_SIZE, MAX_GRAPHICS_FRAME_SIZE, PROTOCOL_VERSION,
+    self, ClientKeybindings, ClientLaunchMode, ClientMessage, NotifyKind, RenderEncoding,
+    ServerMessage, MAX_FRAME_SIZE, MAX_GRAPHICS_FRAME_SIZE, PROTOCOL_VERSION,
 };
+#[cfg(unix)]
+use crate::protocol::{AttachScrollDirection, AttachScrollSource, MAX_CLIPBOARD_IMAGE_PAYLOAD};
 use crate::server::socket_paths::client_socket_path;
 
 static RECEIVED_KITTY_GRAPHICS_IDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
@@ -58,17 +66,33 @@ struct ClientState {
     /// Direct attach prefix escape state. None for full-app clients.
     attach_escape: Option<AttachEscapeState>,
     /// Rows scrolled for one direct-attach wheel notch.
+    #[cfg(unix)]
     mouse_scroll_lines: usize,
     /// Whether outer focus gain should force a full host-terminal redraw.
     redraw_on_focus_gained: bool,
+    #[cfg(windows)]
+    pending_cursor_reveal: Option<PendingCursorReveal>,
 }
 
 #[derive(Debug, Default)]
+#[cfg(windows)]
+struct AttachEscapeState;
+
+#[derive(Debug)]
+#[cfg(windows)]
+struct PendingCursorReveal {
+    due_at: Instant,
+    bytes: Vec<u8>,
+}
+
+#[derive(Debug, Default)]
+#[cfg(unix)]
 struct AttachEscapeState {
     pending_prefix: bool,
 }
 
 #[derive(Debug)]
+#[cfg(unix)]
 enum AttachInputAction {
     Forward(Vec<u8>),
     Scroll {
@@ -84,6 +108,7 @@ enum AttachInputAction {
 }
 
 impl AttachEscapeState {
+    #[cfg(unix)]
     fn filter_input(
         &mut self,
         data: Vec<u8>,
@@ -126,6 +151,7 @@ impl AttachEscapeState {
     }
 }
 
+#[cfg(unix)]
 fn attach_scroll_action(
     data: &[u8],
     viewport_rows: u16,
@@ -186,6 +212,37 @@ fn attach_scroll_action(
 impl ClientState {
     fn request_full_redraw(&mut self) {
         self.blit_encoder = render_ansi::BlitEncoder::new();
+        #[cfg(windows)]
+        {
+            self.pending_cursor_reveal = None;
+        }
+    }
+
+    #[cfg(windows)]
+    fn update_pending_cursor_reveal(&mut self, reveal: Option<Vec<u8>>) {
+        const CURSOR_REVEAL_DEBOUNCE: Duration = Duration::from_millis(90);
+        self.pending_cursor_reveal = reveal.map(|bytes| PendingCursorReveal {
+            due_at: Instant::now() + CURSOR_REVEAL_DEBOUNCE,
+            bytes,
+        });
+    }
+
+    #[cfg(windows)]
+    fn flush_pending_cursor_reveal_if_due(&mut self) {
+        let Some(pending) = &self.pending_cursor_reveal else {
+            return;
+        };
+        if pending.due_at > Instant::now() {
+            return;
+        }
+
+        let pending = self
+            .pending_cursor_reveal
+            .take()
+            .expect("pending cursor reveal");
+        let mut stdout = io::stdout();
+        let _ = stdout.write_all(&pending.bytes);
+        let _ = stdout.flush();
     }
 }
 
@@ -304,20 +361,16 @@ fn setup_terminal_with_capabilities(
 
     if enable_client_protocols {
         if mouse_capture {
-            execute!(io::stdout(), EnableMouseCapture)?;
+            set_mouse_capture(true)?;
         } else {
-            execute!(io::stdout(), DisableMouseCapture)?;
+            set_mouse_capture(false)?;
         }
-        execute!(
-            io::stdout(),
-            EnableBracketedPaste,
-            EnableFocusChange,
-            PushKeyboardEnhancementFlags(crate::input::ime_compatible_keyboard_enhancement_flags())
-        )?;
+        execute!(io::stdout(), EnableBracketedPaste, EnableFocusChange)?;
+        push_keyboard_enhancement_flags()?;
     } else if mouse_capture {
-        execute!(io::stdout(), EnableMouseCapture)?;
+        set_mouse_capture(true)?;
     } else {
-        execute!(io::stdout(), DisableMouseCapture)?;
+        set_mouse_capture(false)?;
     }
 
     let modify_other_keys_mode = enable_client_protocols
@@ -354,7 +407,12 @@ fn set_mouse_capture(enabled: bool) -> io::Result<()> {
     if enabled {
         execute!(io::stdout(), EnableMouseCapture)
     } else {
-        execute!(io::stdout(), DisableMouseCapture)
+        match execute!(io::stdout(), DisableMouseCapture) {
+            Ok(()) => Ok(()),
+            #[cfg(windows)]
+            Err(err) if err.to_string() == "Initial console modes not set" => Ok(()),
+            Err(err) => Err(err),
+        }
     }
 }
 
@@ -367,15 +425,38 @@ fn restore_terminal_state(reset_modify_other_keys: bool) {
         let _ = io::stdout().flush();
     }
 
+    let _ = pop_keyboard_enhancement_flags();
     let _ = execute!(
         io::stdout(),
-        PopKeyboardEnhancementFlags,
         DisableFocusChange,
         DisableBracketedPaste,
         DisableMouseCapture
     );
     ratatui::restore();
     let _ = write_terminal_restore_postlude(&mut io::stdout());
+}
+
+#[cfg(not(windows))]
+fn push_keyboard_enhancement_flags() -> io::Result<()> {
+    execute!(
+        io::stdout(),
+        PushKeyboardEnhancementFlags(crate::input::ime_compatible_keyboard_enhancement_flags())
+    )
+}
+
+#[cfg(windows)]
+fn push_keyboard_enhancement_flags() -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn pop_keyboard_enhancement_flags() -> io::Result<()> {
+    execute!(io::stdout(), PopKeyboardEnhancementFlags)
+}
+
+#[cfg(windows)]
+fn pop_keyboard_enhancement_flags() -> io::Result<()> {
+    Ok(())
 }
 
 impl Drop for TerminalGuard {
@@ -409,12 +490,39 @@ fn requested_keybindings() -> ClientKeybindings {
     }
 }
 
+#[cfg(windows)]
+fn set_handshake_recv_timeout(
+    stream: &LocalStream,
+    timeout: Option<Duration>,
+    context: &'static str,
+) -> Result<(), ClientError> {
+    match stream.set_recv_timeout(timeout) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+            debug!(err = %err, context, "client socket receive timeout unavailable");
+            Ok(())
+        }
+        Err(err) => Err(ClientError::ConnectionFailed(err)),
+    }
+}
+
+#[cfg(not(windows))]
+fn set_handshake_recv_timeout(
+    stream: &LocalStream,
+    timeout: Option<Duration>,
+    _context: &'static str,
+) -> Result<(), ClientError> {
+    stream
+        .set_recv_timeout(timeout)
+        .map_err(ClientError::ConnectionFailed)
+}
+
 /// Performs the client→server handshake.
 ///
 /// Sends Hello with the terminal size and protocol version, reads the Welcome
 /// response. Returns Ok(()) on success, or an error if the server rejects us.
 fn do_handshake(
-    stream: &mut UnixStream,
+    stream: &mut LocalStream,
     cols: u16,
     rows: u16,
     cell_width_px: u32,
@@ -445,13 +553,17 @@ fn do_handshake(
         .map_err(|e| ClientError::ConnectionFailed(io::Error::other(e.to_string())))?;
 
     // Read Welcome.
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(ClientError::ConnectionFailed)?;
+    set_handshake_recv_timeout(
+        stream,
+        Some(Duration::from_secs(5)),
+        "client handshake read timeout unavailable",
+    )?;
     let welcome: ServerMessage = protocol::read_message(stream, MAX_FRAME_SIZE)?;
-    stream
-        .set_read_timeout(None)
-        .map_err(ClientError::ConnectionFailed)?;
+    set_handshake_recv_timeout(
+        stream,
+        None,
+        "failed to clear client handshake read timeout",
+    )?;
 
     match welcome {
         ServerMessage::Welcome {
@@ -478,7 +590,11 @@ fn do_handshake(
 /// Internal events for the client event loop.
 enum ClientLoopEvent {
     /// Raw input bytes from stdin.
+    #[cfg(unix)]
     StdinInput(Vec<u8>),
+    /// Structured input events from platforms without Unix-style stdin bytes.
+    #[cfg(windows)]
+    StdinEvents(Vec<crate::protocol::ClientInputEvent>),
     /// Terminal resize detected.
     Resize(u16, u16, u32, u32),
     /// Server message received.
@@ -503,6 +619,7 @@ pub fn run_client() -> io::Result<()> {
 }
 
 /// Runs a direct terminal attach client.
+#[cfg(unix)]
 pub fn run_terminal_attach(terminal_id: String, takeover: bool) -> io::Result<()> {
     run_client_with_mode(
         RenderEncoding::TerminalAnsi,
@@ -510,6 +627,16 @@ pub fn run_terminal_attach(terminal_id: String, takeover: bool) -> io::Result<()
         Some(AttachEscapeState::default()),
         "attaching to terminal",
     )
+}
+
+/// Direct terminal attach is Unix raw-byte input only until Windows gets a semantic attach path.
+#[cfg(windows)]
+pub fn run_terminal_attach(_terminal_id: String, _takeover: bool) -> io::Result<()> {
+    debug_assert!(!crate::platform::capabilities().direct_terminal_attach);
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "direct terminal attach is not supported on Windows yet",
+    ))
 }
 
 fn run_client_with_mode(
@@ -521,6 +648,7 @@ fn run_client_with_mode(
     init_logging();
 
     let loaded_config = crate::config::Config::load();
+    let mouse_capture = loaded_config.config.ui.mouse_capture;
     let mouse_scroll_lines = loaded_config.config.ui.mouse_scroll_lines();
     let redraw_on_focus_gained = loaded_config.config.ui.redraw_on_focus_gained;
     let sound_config = loaded_config.config.ui.sound;
@@ -533,7 +661,7 @@ fn run_client_with_mode(
     info!(path = %socket_path.display(), "{log_message}");
 
     // Try to connect to the server.
-    let mut stream = match UnixStream::connect(&socket_path) {
+    let mut stream = match crate::ipc::connect_local_stream(&socket_path) {
         Ok(s) => s,
         Err(err) => {
             // Server unreachable — show clear error and exit.
@@ -578,10 +706,10 @@ fn run_client_with_mode(
     // Now set up the terminal. This must happen AFTER the handshake succeeds,
     // so we don't leave the terminal in raw mode if the server rejects us.
     let direct_attach = attach_escape.is_some();
-    let _guard = if direct_attach {
+    let terminal_guard = if direct_attach {
         setup_direct_attach_terminal()
     } else {
-        setup_terminal(false)
+        setup_terminal(mouse_capture)
     }
     .map_err(|err| {
         eprintln!("herdr: failed to set up terminal: {err}");
@@ -589,10 +717,10 @@ fn run_client_with_mode(
     })?;
 
     // Install a panic hook to restore the terminal on panic (same as monolithic).
-    let in_tmux = std::env::var("TMUX").is_ok();
+    let panic_resets_modify_other_keys = terminal_guard.reset_modify_other_keys;
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        restore_terminal_state(in_tmux);
+        restore_terminal_state(panic_resets_modify_other_keys);
         original_hook(info);
     }));
 
@@ -620,7 +748,7 @@ fn run_client_with_mode(
             mouse_scroll_lines,
             redraw_on_focus_gained,
             kitty_graphics_enabled,
-            false,
+            mouse_capture,
             negotiated_encoding,
             attach_escape,
         )
@@ -628,7 +756,7 @@ fn run_client_with_mode(
     });
 
     // Restore the terminal before printing any final status message.
-    drop(_guard);
+    drop(terminal_guard);
 
     if let Err(err) = result {
         eprintln!("herdr: {err}");
@@ -660,7 +788,7 @@ fn run_client_with_mode(
 /// - server reader thread → reads ServerMessages and sends to main loop
 /// - main loop: coordinates input, output, and server communication
 async fn run_client_loop(
-    stream: UnixStream,
+    stream: LocalStream,
     cols: u16,
     rows: u16,
     should_quit: Arc<AtomicBool>,
@@ -672,6 +800,9 @@ async fn run_client_loop(
     negotiated_encoding: RenderEncoding,
     attach_escape: Option<AttachEscapeState>,
 ) -> Result<(), ClientError> {
+    #[cfg(windows)]
+    let _ = mouse_scroll_lines;
+
     let mut state = ClientState {
         blit_encoder: render_ansi::BlitEncoder::new(),
         mouse_capture_active,
@@ -679,8 +810,11 @@ async fn run_client_loop(
         sound_config,
         kitty_graphics_enabled,
         attach_escape,
+        #[cfg(unix)]
         mouse_scroll_lines,
         redraw_on_focus_gained,
+        #[cfg(windows)]
+        pending_cursor_reveal: None,
     };
     debug!(?negotiated_encoding, "client render encoding active");
 
@@ -694,7 +828,7 @@ async fn run_client_loop(
         input::stdin_reader_loop(stdin_tx, &stdin_quit);
     });
 
-    if state.attach_escape.is_none() {
+    if state.attach_escape.is_none() && should_query_host_terminal_theme() {
         query_host_terminal_theme();
     }
 
@@ -739,6 +873,7 @@ async fn run_client_loop(
         };
 
         match event {
+            #[cfg(unix)]
             ClientLoopEvent::StdinInput(data) => {
                 let data = if let Some(attach_escape) = &mut state.attach_escape {
                     match attach_escape.filter_input(
@@ -817,6 +952,26 @@ async fn run_client_loop(
                     return Err(ClientError::ConnectionLost(e));
                 }
             }
+            #[cfg(windows)]
+            ClientLoopEvent::StdinEvents(events) => {
+                if state.attach_escape.is_some() {
+                    continue;
+                }
+                let raw_events = events
+                    .iter()
+                    .map(crate::protocol::ClientInputEvent::to_raw_input_event)
+                    .collect::<Vec<_>>();
+                if crate::raw_input::events_require_host_surface_redraw(
+                    &raw_events,
+                    state.redraw_on_focus_gained,
+                ) {
+                    state.request_full_redraw();
+                }
+                let msg = ClientMessage::InputEvents { events };
+                if let Err(e) = write_to_server(&mut write_stream, &msg) {
+                    return Err(ClientError::ConnectionLost(e));
+                }
+            }
             ClientLoopEvent::Resize(new_cols, new_rows, cell_width_px, cell_height_px) => {
                 state.reported_size = (new_cols, new_rows);
                 let msg = ClientMessage::Resize {
@@ -831,7 +986,14 @@ async fn run_client_loop(
             }
             ClientLoopEvent::ServerMessage(msg) => match msg {
                 ServerMessage::Frame(frame_data) => {
+                    #[cfg(windows)]
+                    let encoded = state
+                        .blit_encoder
+                        .encode_with_deferred_cursor_reveal(&frame_data, false);
+                    #[cfg(not(windows))]
                     let encoded = state.blit_encoder.encode(&frame_data, false);
+                    #[cfg(windows)]
+                    let deferred_cursor_reveal = encoded.deferred_cursor_reveal.clone();
                     let mut stdout = io::stdout();
                     let graphics = if state.kitty_graphics_enabled {
                         frame_data.graphics.as_slice()
@@ -842,6 +1004,8 @@ async fn run_client_loop(
                         write_encoded_frame_with_graphics(&mut stdout, &encoded.bytes, graphics);
                     let _ = stdout.flush();
                     state.blit_encoder.commit(frame_data, encoded);
+                    #[cfg(windows)]
+                    state.update_pending_cursor_reveal(deferred_cursor_reveal);
                 }
                 ServerMessage::Terminal(frame) => {
                     if state.kitty_graphics_enabled && contains_kitty_graphics_bytes(&frame.bytes) {
@@ -862,8 +1026,12 @@ async fn run_client_loop(
                 ServerMessage::ServerShutdown { reason } => {
                     return Err(ClientError::ServerShutdown { reason });
                 }
-                ServerMessage::Notify { kind, message } => {
-                    handle_notify(kind, &message, &state.sound_config);
+                ServerMessage::Notify {
+                    kind,
+                    message,
+                    body,
+                } => {
+                    handle_notify(kind, &message, body.as_deref(), &state.sound_config);
                 }
                 ServerMessage::Clipboard { data } => {
                     forward_clipboard(&data);
@@ -893,7 +1061,8 @@ async fn run_client_loop(
                 )));
             }
             ClientLoopEvent::Timer => {
-                // Check if we should quit.
+                #[cfg(windows)]
+                state.flush_pending_cursor_reveal_if_due();
             }
         }
     }
@@ -913,7 +1082,7 @@ async fn run_client_loop(
 /// Blocking thread that reads ServerMessages from the server and sends them
 /// to the main event loop.
 fn server_reader_thread(
-    mut stream: UnixStream,
+    mut stream: LocalStream,
     event_tx: tokio::sync::mpsc::Sender<ClientLoopEvent>,
     should_quit: &Arc<AtomicBool>,
     max_frame_size: usize,
@@ -966,7 +1135,7 @@ fn server_reader_thread(
 // ---------------------------------------------------------------------------
 
 /// Writes a message to the server stream (blocking).
-fn write_to_server(stream: &mut UnixStream, msg: &ClientMessage) -> io::Result<()> {
+fn write_to_server(stream: &mut LocalStream, msg: &ClientMessage) -> io::Result<()> {
     protocol::write_message(stream, msg).map_err(|e| io::Error::other(e.to_string()))
 }
 
@@ -993,10 +1162,16 @@ fn reload_local_client_config(
     }
 }
 
-fn handle_notify(kind: NotifyKind, message: &str, sound_config: &crate::config::SoundConfig) {
+fn handle_notify(
+    kind: NotifyKind,
+    message: &str,
+    body: Option<&str>,
+    sound_config: &crate::config::SoundConfig,
+) {
     handle_notify_with_notifiers(
         kind,
         message,
+        body,
         sound_config,
         crate::terminal_notify::show_notification,
         crate::platform::show_desktop_notification,
@@ -1006,6 +1181,7 @@ fn handle_notify(kind: NotifyKind, message: &str, sound_config: &crate::config::
 fn handle_notify_with_notifiers(
     kind: NotifyKind,
     message: &str,
+    body: Option<&str>,
     sound_config: &crate::config::SoundConfig,
     mut show_terminal_notification: impl FnMut(&str, Option<&str>) -> io::Result<bool>,
     mut show_system_notification: impl FnMut(&str, Option<&str>) -> io::Result<bool>,
@@ -1028,8 +1204,7 @@ fn handle_notify_with_notifiers(
                 message = message,
                 "received terminal toast notification from server"
             );
-            let (title, body) = crate::terminal_notify::split_message(message);
-            if let Err(err) = show_terminal_notification(title, body) {
+            if let Err(err) = show_terminal_notification(message, body) {
                 warn!(err = %err, "failed to emit terminal notification");
             }
         }
@@ -1038,8 +1213,7 @@ fn handle_notify_with_notifiers(
                 message = message,
                 "received system toast notification from server"
             );
-            let (title, body) = crate::terminal_notify::split_message(message);
-            if let Err(err) = show_system_notification(title, body) {
+            if let Err(err) = show_system_notification(message, body) {
                 warn!(err = %err, "failed to emit system notification");
             }
         }
@@ -1054,6 +1228,7 @@ fn sound_from_notify_message(message: &str) -> Option<crate::sound::Sound> {
     }
 }
 
+#[cfg(unix)]
 fn should_bridge_clipboard_image_paste(data: &[u8]) -> bool {
     if data == b"\x1b[200~\x1b[201~" {
         return true;
@@ -1245,6 +1420,10 @@ fn query_host_terminal_theme() {
     let _ = write_host_terminal_theme_query(io::stdout());
 }
 
+fn should_query_host_terminal_theme() -> bool {
+    !cfg!(windows)
+}
+
 fn write_host_terminal_theme_query(mut writer: impl io::Write) -> io::Result<()> {
     writer.write_all(crate::terminal_theme::HOST_COLOR_QUERY_SEQUENCE.as_bytes())?;
     writer.flush()
@@ -1321,6 +1500,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn clipboard_image_paste_bridge_triggers_on_ctrl_v_and_empty_paste() {
         assert!(should_bridge_clipboard_image_paste(&[0x16]));
@@ -1391,12 +1571,18 @@ mod tests {
     }
 
     #[test]
+    fn host_terminal_theme_query_is_disabled_on_windows() {
+        assert_eq!(should_query_host_terminal_theme(), !cfg!(windows));
+    }
+
+    #[test]
     fn terminal_restore_postlude_restores_visible_default_cursor() {
         let mut output = Vec::new();
         write_terminal_restore_postlude(&mut output).unwrap();
         assert_eq!(output, b"\x1b[?25h\x1b[0 q");
     }
 
+    #[cfg(unix)]
     #[test]
     fn attach_escape_detaches_on_prefix_q() {
         let mut escape = AttachEscapeState::default();
@@ -1410,6 +1596,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn attach_escape_sends_literal_prefix_on_double_prefix() {
         let mut escape = AttachEscapeState::default();
@@ -1423,6 +1610,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn attach_escape_forwards_prefix_before_non_escape_key() {
         let mut escape = AttachEscapeState::default();
@@ -1436,6 +1624,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn attach_escape_turns_wheel_into_scroll_action() {
         let mut escape = AttachEscapeState::default();
@@ -1458,6 +1647,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn attach_escape_swallows_non_wheel_mouse_reports() {
         let mut escape = AttachEscapeState::default();
@@ -1467,6 +1657,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn attach_escape_turns_plain_page_keys_into_scroll_actions() {
         let mut escape = AttachEscapeState::default();
@@ -1509,6 +1700,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn attach_escape_forwards_modified_page_key() {
         let mut escape = AttachEscapeState::default();
@@ -1684,7 +1876,8 @@ mod tests {
 
         handle_notify_with_notifiers(
             NotifyKind::Toast,
-            "pi finished: workspace 1",
+            "pi finished",
+            Some("workspace 1"),
             &sound_config,
             |title, body| {
                 emitted = Some((title.to_string(), body.map(str::to_string)));
@@ -1706,7 +1899,8 @@ mod tests {
 
         handle_notify_with_notifiers(
             NotifyKind::SystemToast,
-            "pi finished: workspace 1",
+            "pi finished",
+            Some("workspace 1"),
             &sound_config,
             |_, _| Ok(false),
             |title, body| {
@@ -1718,6 +1912,32 @@ mod tests {
         assert_eq!(
             emitted,
             Some(("pi finished".to_string(), Some("workspace 1".to_string())))
+        );
+    }
+
+    #[test]
+    fn system_toast_notify_preserves_colon_in_title() {
+        let sound_config = crate::config::SoundConfig::default();
+        let mut emitted = None;
+
+        handle_notify_with_notifiers(
+            NotifyKind::SystemToast,
+            "build: failed",
+            Some("api workspace"),
+            &sound_config,
+            |_, _| Ok(false),
+            |title, body| {
+                emitted = Some((title.to_string(), body.map(str::to_string)));
+                Ok(true)
+            },
+        );
+
+        assert_eq!(
+            emitted,
+            Some((
+                "build: failed".to_string(),
+                Some("api workspace".to_string())
+            ))
         );
     }
 

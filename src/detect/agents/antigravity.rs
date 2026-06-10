@@ -1,12 +1,7 @@
 use super::super::AgentState;
 
 pub(super) fn detect(content: &str) -> AgentState {
-    let lower = content.to_lowercase();
-
-    let has_permission_request = lower.contains("requesting permission for:");
-    let has_permission_question = lower.contains("do you want to proceed?");
-    let has_permission_controls = lower.contains("tab amend") && lower.contains("edit command");
-    if has_permission_request && (has_permission_question || has_permission_controls) {
+    if has_visible_blocker(content) {
         return AgentState::Blocked;
     }
 
@@ -15,6 +10,14 @@ pub(super) fn detect(content: &str) -> AgentState {
     }
 
     AgentState::Idle
+}
+
+pub(super) fn has_visible_blocker(content: &str) -> bool {
+    let lower = content.to_lowercase();
+    let has_permission_request = lower.contains("requesting permission for:");
+    let has_permission_question = lower.contains("do you want to proceed?");
+    let has_permission_controls = lower.contains("tab amend") && lower.contains("edit command");
+    has_permission_request && (has_permission_question || has_permission_controls)
 }
 
 fn has_antigravity_spinner(content: &str) -> bool {

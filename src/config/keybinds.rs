@@ -291,6 +291,10 @@ pub struct Keybinds {
     pub focus_pane_down: ActionKeybinds,
     pub focus_pane_up: ActionKeybinds,
     pub focus_pane_right: ActionKeybinds,
+    pub swap_pane_left: ActionKeybinds,
+    pub swap_pane_down: ActionKeybinds,
+    pub swap_pane_up: ActionKeybinds,
+    pub swap_pane_right: ActionKeybinds,
     pub cycle_pane_next: ActionKeybinds,
     pub cycle_pane_previous: ActionKeybinds,
     pub last_pane: ActionKeybinds,
@@ -470,6 +474,10 @@ impl Config {
             focus_pane_down: action!("keys.focus_pane_down", &self.keys.focus_pane_down),
             focus_pane_up: action!("keys.focus_pane_up", &self.keys.focus_pane_up),
             focus_pane_right: action!("keys.focus_pane_right", &self.keys.focus_pane_right),
+            swap_pane_left: action!("keys.swap_pane_left", &self.keys.swap_pane_left),
+            swap_pane_down: action!("keys.swap_pane_down", &self.keys.swap_pane_down),
+            swap_pane_up: action!("keys.swap_pane_up", &self.keys.swap_pane_up),
+            swap_pane_right: action!("keys.swap_pane_right", &self.keys.swap_pane_right),
             last_pane: action!("keys.last_pane", &self.keys.last_pane),
             cycle_pane_next: action!("keys.cycle_pane_next", &self.keys.cycle_pane_next),
             cycle_pane_previous: action!(
@@ -1734,6 +1742,34 @@ switch_workspace = "prefix+shift+1..9"
             .bindings
             .iter()
             .all(|binding| binding.trigger.is_prefix()));
+        assert_eq!(
+            binding_triggers(&kb.swap_pane_left),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('h'),
+                KeyModifiers::SHIFT
+            ))]
+        );
+        assert_eq!(
+            binding_triggers(&kb.swap_pane_down),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('j'),
+                KeyModifiers::SHIFT
+            ))]
+        );
+        assert_eq!(
+            binding_triggers(&kb.swap_pane_up),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('k'),
+                KeyModifiers::SHIFT
+            ))]
+        );
+        assert_eq!(
+            binding_triggers(&kb.swap_pane_right),
+            vec![BindingTrigger::Prefix((
+                KeyCode::Char('l'),
+                KeyModifiers::SHIFT
+            ))]
+        );
     }
 
     #[test]

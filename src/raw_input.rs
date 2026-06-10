@@ -953,6 +953,7 @@ mod tests {
             (b"\x1b[127;3u", KeyCode::Backspace, KeyModifiers::ALT),
             (b"\x1b[57420;1u", KeyCode::Down, KeyModifiers::empty()),
             (b"\x1b[57423;1u", KeyCode::Home, KeyModifiers::empty()),
+            (b"\x1bOq", KeyCode::Char('1'), KeyModifiers::empty()),
             (b"\x1b[49:33;2:1u", KeyCode::Char('1'), KeyModifiers::SHIFT),
         ];
 
@@ -961,6 +962,29 @@ mod tests {
             assert_eq!(consumed, bytes.len());
             assert_raw_key(event, *code, *modifiers);
         }
+    }
+
+    #[test]
+    fn raw_framer_waits_for_application_keypad_sequence_final_byte() {
+        let mut framer = RawInputFramer::default();
+
+        assert!(framer.push(b"\x1bO").is_empty());
+        let events = framer.push(b"q");
+
+        assert_eq!(events.len(), 1);
+        assert_raw_key(
+            events.into_iter().next().unwrap(),
+            KeyCode::Char('1'),
+            KeyModifiers::empty(),
+        );
+    }
+
+    #[test]
+    fn unsupported_ss3_sequence_stays_unsupported() {
+        let (event, consumed) = extract_one_event(b"\x1bOz").unwrap();
+
+        assert_eq!(consumed, 3);
+        assert!(matches!(event, RawInputEvent::Unsupported));
     }
 
     #[test]

@@ -1052,7 +1052,10 @@ pub enum ContextMenuKind {
         tab_idx: usize,
     },
     Pane {
+        ws_idx: usize,
+        tab_idx: usize,
         pane_id: PaneId,
+        source_pane_id: Option<PaneId>,
         has_manual_label: bool,
     },
 }
@@ -1105,22 +1108,49 @@ impl ContextMenuState {
             ContextMenuKind::Tab { .. } => &["New tab", "Rename", "Close"],
             ContextMenuKind::Pane {
                 has_manual_label: true,
+                source_pane_id: Some(_),
                 ..
             } => &[
                 "Rename pane",
                 "Clear pane name",
-                "Split vertical",
-                "Split horizontal",
+                "Swap with focused pane",
+                "Split right",
+                "Split down",
                 "Zoom",
                 "Close pane",
             ],
             ContextMenuKind::Pane {
                 has_manual_label: false,
+                source_pane_id: Some(_),
                 ..
             } => &[
                 "Rename pane",
-                "Split vertical",
-                "Split horizontal",
+                "Swap with focused pane",
+                "Split right",
+                "Split down",
+                "Zoom",
+                "Close pane",
+            ],
+            ContextMenuKind::Pane {
+                has_manual_label: true,
+                source_pane_id: None,
+                ..
+            } => &[
+                "Rename pane",
+                "Clear pane name",
+                "Split right",
+                "Split down",
+                "Zoom",
+                "Close pane",
+            ],
+            ContextMenuKind::Pane {
+                has_manual_label: false,
+                source_pane_id: None,
+                ..
+            } => &[
+                "Rename pane",
+                "Split right",
+                "Split down",
                 "Zoom",
                 "Close pane",
             ],
@@ -1146,7 +1176,31 @@ pub struct ToastNotification {
     pub kind: ToastKind,
     pub title: String,
     pub context: String,
+    pub position: Option<crate::config::ToastHerdrPosition>,
     pub target: Option<ToastTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingAgentNotification {
+    pub pane_id: PaneId,
+    pub workspace_id: String,
+    pub agent_label: String,
+    pub known_agent: Option<crate::detect::Agent>,
+    pub kind: ToastKind,
+    pub state: AgentState,
+    pub deadline: std::time::Instant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentNotificationDelivery {
+    pub pane_id: PaneId,
+    pub workspace_id: String,
+    pub agent_label: String,
+    pub known_agent: Option<crate::detect::Agent>,
+    pub kind: ToastKind,
+    pub toast: Option<ToastNotification>,
+    pub client_notification: Option<ToastNotification>,
+    pub sound: Option<crate::sound::Sound>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1258,6 +1312,7 @@ pub struct AppState {
     pub update_dismissed: bool,
     pub config_diagnostic: Option<String>,
     pub toast: Option<ToastNotification>,
+    pub pending_agent_notifications: std::collections::HashMap<PaneId, PendingAgentNotification>,
     pub copy_feedback: Option<CopyFeedback>,
     /// Last reported focus state for the outer terminal hosting herdr.
     /// None means unsupported or not yet reported, which preserves active-pane suppression.
@@ -1362,6 +1417,14 @@ impl AppState {
 
     pub fn switch_ascii_input_source_in_prefix_enabled(&self) -> bool {
         self.switch_ascii_input_source_in_prefix
+    }
+
+    pub(crate) fn pane_exposes_host_cursor(
+        &self,
+        _ws_idx: usize,
+        _pane_id: crate::layout::PaneId,
+    ) -> bool {
+        true
     }
 
     pub(crate) fn integration_updates_available(&self) -> bool {
@@ -1585,6 +1648,7 @@ impl AppState {
             update_dismissed: false,
             config_diagnostic: None,
             toast: None,
+            pending_agent_notifications: std::collections::HashMap::new(),
             copy_feedback: None,
             outer_terminal_focus: None,
             prefix_code: KeyCode::Char('b'),
@@ -1682,6 +1746,28 @@ impl AppState {
 mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
+
+    #[test]
+    fn agent_terminal_keeps_final_child_cursor_exposed() {
+        let mut state = AppState::test_new();
+        let ws = crate::workspace::Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        state.terminals.insert(
+            ws.tabs[0].panes[&pane_id].attached_terminal_id.clone(),
+            crate::terminal::TerminalState::new(
+                ws.tabs[0].panes[&pane_id].attached_terminal_id.clone(),
+                std::path::PathBuf::from("/tmp"),
+            ),
+        );
+        state
+            .terminals
+            .get_mut(&ws.tabs[0].panes[&pane_id].attached_terminal_id)
+            .expect("terminal state")
+            .launch_argv = Some(vec!["codex".to_string()]);
+        state.workspaces = vec![ws];
+
+        assert!(state.pane_exposes_host_cursor(0, pane_id));
+    }
 
     #[test]
     fn built_in_theme_names_resolve() {

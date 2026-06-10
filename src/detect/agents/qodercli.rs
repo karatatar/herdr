@@ -7,15 +7,7 @@ use super::super::AgentState;
 pub(super) fn detect(content: &str) -> AgentState {
     let lower = content.to_lowercase();
 
-    // Idle short-circuit: double-press confirmation hints render *over* the
-    // input prompt while the user briefly holds Ctrl+C / Esc. The pane is
-    // effectively idle there — without this, a stale spinner row above could
-    // still flip it to Working.
-    if has_qodercli_idle_override(&lower) {
-        return AgentState::Idle;
-    }
-
-    if has_qodercli_blocked_prompt(&lower) {
+    if has_visible_blocker(content) {
         return AgentState::Blocked;
     }
 
@@ -25,17 +17,6 @@ pub(super) fn detect(content: &str) -> AgentState {
     }
 
     AgentState::Idle
-}
-
-/// Idle override hints. Mirrors the `⌕ Search…` / `ctrl+r to toggle` shortcut
-/// in Claude detection: when these UI bits are visible the pane is sitting at
-/// a static prompt and should not be classified as Working or Blocked.
-///
-/// Covers qodercli's "press again" exit/rewind banners.
-fn has_qodercli_idle_override(lower_content: &str) -> bool {
-    lower_content.contains("press ctrl+c again to exit")
-        || lower_content.contains("press ctrl+d again to exit")
-        || lower_content.contains("press esc again to rewind")
 }
 
 /// Working hints qodercli prints alongside the spinner while the model is
@@ -87,9 +68,15 @@ fn has_qodercli_spinner_row(content: &str) -> bool {
 ///   defensive fallbacks in case the title row scrolls off-screen.
 /// * The interactive shell waiting hint emitted by qodercli when an agent
 ///   spawns a shell that is now parked for user keystrokes.
-fn has_qodercli_blocked_prompt(lower_content: &str) -> bool {
-    lower_content.contains("waiting for user confirmation")
-        || lower_content.contains("awaiting approval")
+pub(super) fn has_visible_blocker(content: &str) -> bool {
+    let lower_content = content.to_lowercase();
+    (lower_content.contains("waiting for user confirmation")
+        && (lower_content.contains("yes")
+            || lower_content.contains("no")
+            || lower_content.contains("allow")
+            || lower_content.contains("reject")))
+        || (lower_content.contains("awaiting approval")
+            && (lower_content.contains("allow") || lower_content.contains("reject")))
         || lower_content.contains("permission required")
         || lower_content.contains("allow once or always?")
         || lower_content.contains("asking user")
