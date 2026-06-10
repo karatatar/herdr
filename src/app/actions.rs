@@ -1258,6 +1258,32 @@ impl AppState {
         }
     }
 
+    pub fn move_active_tab_left(&mut self) {
+        let Some(active) = self
+            .active
+            .and_then(|i| self.workspaces.get(i))
+            .map(|ws| ws.active_tab)
+        else {
+            return;
+        };
+        if active > 0 {
+            self.move_tab(active, active - 1);
+        }
+    }
+
+    pub fn move_active_tab_right(&mut self) {
+        let Some((active, len)) = self
+            .active
+            .and_then(|i| self.workspaces.get(i))
+            .map(|ws| (ws.active_tab, ws.tabs.len()))
+        else {
+            return;
+        };
+        if active + 1 < len {
+            self.move_tab(active, active + 2);
+        }
+    }
+
     pub fn next_agent(&mut self) {
         self.cycle_agent_entry(true);
     }
