@@ -1354,7 +1354,7 @@ impl App {
                             {
                                 // Copy mode exempts arrow keys so holding
                                 // Up/Down/Left/Right moves the cursor continuously.
-                                self.handle_non_terminal_key(key);
+                                self.handle_non_terminal_key_headless(key);
                             }
                             // Other repeats in non-terminal modes are ignored
                             // (same as monolithic behavior).
