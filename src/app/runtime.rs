@@ -3,9 +3,9 @@ use std::time::{Duration, Instant};
 use crossterm::terminal;
 
 use super::{
-    auto_updates_enabled, is_copy_mode_repeat_key, repeat_key_identity, App, Mode, ANIMATION_INTERVAL,
-    AUTO_UPDATE_CHECK_INTERVAL, GIT_REMOTE_STATUS_REFRESH_INTERVAL, MIN_RENDER_INTERVAL,
-    RESIZE_POLL_INTERVAL, SELECTION_AUTOSCROLL_INTERVAL,
+    auto_updates_enabled, is_copy_mode_repeat_key, repeat_key_identity, App, Mode,
+    ANIMATION_INTERVAL, AUTO_UPDATE_CHECK_INTERVAL, GIT_REMOTE_STATUS_REFRESH_INTERVAL,
+    MIN_RENDER_INTERVAL, RESIZE_POLL_INTERVAL, SELECTION_AUTOSCROLL_INTERVAL,
 };
 use crate::events::AppEvent;
 use crate::workspace::{GitStatusCacheEntry, Workspace, WorkspaceGitStatus};

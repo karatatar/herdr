@@ -1402,8 +1402,7 @@ impl App {
                                 if !self.suppressed_repeat_keys.contains(&key_id) {
                                     self.handle_terminal_key_headless(key);
                                 }
-                            } else if self.state.mode == Mode::Copy
-                                && is_copy_mode_repeat_key(&key)
+                            } else if self.state.mode == Mode::Copy && is_copy_mode_repeat_key(&key)
                             {
                                 // Copy mode exempts arrow keys so holding
                                 // Up/Down/Left/Right moves the cursor continuously.
