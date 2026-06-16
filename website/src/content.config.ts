@@ -18,6 +18,7 @@ export const collections = {
       description: z.string(),
       date: z.coerce.date(),
       draft: z.boolean().default(false),
+      ogImage: z.string().optional(),
     }),
   }),
   releases: defineCollection({

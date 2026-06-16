@@ -25,6 +25,8 @@ const sectionHeadings = headings.filter((heading) => heading.depth === 2);
   description={post.data.description}
   canonicalPath={`/blog/${slug}/`}
   ogType="article"
+  ogImage={post.data.ogImage}
+  ogImageAlt={post.data.ogImage ? post.data.title : undefined}
 >
   <main class="content-shell">
     <div class="article-layout section">

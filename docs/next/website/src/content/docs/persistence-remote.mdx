@@ -9,25 +9,7 @@ For the local, SSH, and `herdr --remote` workflows, see [How to work with Herdr]
 
 ## Detach and reattach
 
-Start Herdr:
-
-```bash
-herdr
-```
-
-Detach the client with `ctrl+b q`.
-
-Your panes and agents keep running. Reattach by running Herdr again:
-
-```bash
-herdr
-```
-
-If you want to end the session and stop its panes, stop the default server:
-
-```bash
-herdr server stop
-```
+Detach the client with `ctrl+b q`; panes and agents keep running. Reattach by running `herdr` again. Stop the session and its panes with `herdr server stop`.
 
 When Herdr starts again after a full server stop, it restores the saved session shape. For what survives detach, server restart, screen history replay, native agent session restore, and live handoff, see [Session state and restore](/docs/session-state/).
 
@@ -55,16 +37,7 @@ herdr session delete side-project --json
 
 ## Remote attach over SSH
 
-Run Herdr on a server and attach from any SSH client:
-
-```bash
-ssh you@server
-herdr
-```
-
-In this mode your shell is remote, Herdr runs on the remote host, and panes keep running there after you detach.
-
-You can also attach through SSH from your local machine:
+There are two remote modes; [How to work with Herdr](/docs/how-to-work/) compares them. SSH to the server and run `herdr` there for the tmux-style path. Or attach through SSH from your local machine:
 
 ```bash
 herdr --remote workbox

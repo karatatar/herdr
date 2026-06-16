@@ -55,6 +55,7 @@ pub enum AppEvent {
         agent_label: String,
         seq: Option<u64>,
         session_ref: Option<crate::agent_resume::AgentSessionRef>,
+        session_start_source: Option<String>,
     },
     /// Display-only agent metadata was reported for a pane.
     HookMetadataReported {
@@ -92,6 +93,11 @@ pub enum AppEvent {
         version: String,
         install_command: String,
     },
+    /// Remote agent detection manifest update check finished.
+    AgentDetectionManifestsUpdated {
+        updated: Vec<crate::detect::manifest_update::ManifestUpdateCommit>,
+        status: crate::detect::manifest_update::ManifestUpdateStatus,
+    },
     /// A pane child emitted a valid OSC 52 clipboard write. The main loop
     /// re-emits it through herdr's own clipboard writer.
     ClipboardWrite { content: Vec<u8> },
@@ -105,6 +111,15 @@ pub enum AppEvent {
     GitStatusRefreshed {
         results: Vec<WorkspaceGitStatus>,
         cache_updates: Vec<(std::path::PathBuf, GitStatusCacheEntry)>,
+    },
+    /// A plugin action or event command finished.
+    PluginCommandFinished {
+        log_id: String,
+        finished_unix_ms: u64,
+        exit_code: Option<i32>,
+        stdout: String,
+        stderr: String,
+        error: Option<String>,
     },
     /// Background `git worktree add` completed.
     WorktreeAddFinished(WorktreeAddResult),

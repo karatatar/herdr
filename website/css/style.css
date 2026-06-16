@@ -903,10 +903,10 @@ samp {
     gap: 0.5rem;
     color: var(--muted);
     font-family: var(--mono);
-    font-size: 0.72rem;
-    font-weight: 700;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: lowercase;
 }
 
 .hero h1,
@@ -923,6 +923,7 @@ samp {
 .hero h1 {
     max-width: 760px;
     font-size: clamp(2.6rem, 5.5vw, 4.6rem);
+    text-wrap: balance;
 }
 
 .hero-lede {
@@ -1121,7 +1122,6 @@ samp {
 }
 
 .windows-install {
-    display: none;
     margin-top: 0.85rem;
     padding-top: 0.85rem;
     border-top: 1px solid var(--line);
@@ -1178,6 +1178,8 @@ samp {
 
 .hero-product-shot {
     margin: 0;
+    width: 100%;
+    container-type: inline-size;
 }
 
 .hero-product-shell {
@@ -1211,8 +1213,8 @@ samp {
     color: var(--term-muted);
     font-family: var(--mono);
     font-size: clamp(0.44rem, 0.72vw, 0.64rem);
+    font-size: clamp(0.4rem, 1.36cqw, 0.64rem);
     line-height: 1.38;
-    pointer-events: none;
     user-select: none;
     border: 1px solid var(--term-border);
 }
@@ -1282,8 +1284,8 @@ samp {
 }
 
 .herdr-ui-mock .mock-sidebar-spacer {
-    flex: 0 0 5.2rem;
-    min-height: 0;
+    flex: 1 1 0;
+    min-height: 0.5rem;
 }
 
 .mock-sidebar-row,
@@ -3150,6 +3152,22 @@ td:last-child {
     margin-top: 0.42rem;
 }
 
+.article-prose blockquote {
+    margin: 1.2rem 0;
+    border-left: 2px solid color-mix(in srgb, var(--accent) 72%, var(--line));
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--bg-elevated) 46%, transparent);
+    padding: 0.72rem 0.95rem;
+    color: color-mix(in srgb, var(--ink) 76%, var(--muted));
+    font-size: 1.06rem;
+    font-weight: 560;
+    line-height: 1.7;
+}
+
+.article-prose blockquote p {
+    margin: 0;
+}
+
 .article-prose a {
     color: var(--accent);
     font-weight: 700;
@@ -3305,5 +3323,206 @@ td:last-child {
 
     .theme-hint::after {
         display: none;
+    }
+}
+
+/* ===== herd mock: interactive views, agent panes, attach animation ===== */
+
+.mock-view {
+    display: none;
+    min-height: 0;
+    grid-template-rows: auto minmax(0, 1fr);
+}
+
+.mock-view.active {
+    display: grid;
+}
+
+.herdr-ui-mock .mock-main {
+    grid-template-rows: minmax(0, 1fr);
+}
+
+.mock-panes.single {
+    grid-template-columns: minmax(0, 1fr);
+}
+
+/* TUI panes pin their prompt/status area to the bottom, like the real thing */
+.mock-pane.tui {
+    display: flex;
+    flex-direction: column;
+}
+
+.mock-pane.tui .tui-bottom {
+    margin-top: auto;
+}
+
+.herdr-ui-mock .mock-space,
+.herdr-ui-mock .mock-agent,
+.herdr-ui-mock .mock-tabs span {
+    cursor: pointer;
+}
+
+.herdr-ui-mock .mock-space:hover,
+.herdr-ui-mock .mock-agent:hover {
+    background: var(--term-active-bg);
+}
+
+.mock-view .mock-panes {
+    display: none;
+}
+
+.mock-view .mock-panes.active {
+    display: grid;
+}
+
+.cc-head b {
+    color: var(--term-text);
+}
+
+.cc-mark,
+.cc-working {
+    color: #d97757;
+}
+
+.cc-bullet {
+    color: #d97757;
+}
+
+.cx-bullet {
+    color: var(--accent);
+}
+
+.cc-rule {
+    margin: 0.5rem 0;
+    border-top: 1px solid var(--term-border);
+}
+
+.cc-permission {
+    margin-top: 0.55rem;
+    border: 1px solid var(--red);
+    padding: 0.5rem 0.6rem;
+}
+
+/* opencode pane: brand gold/purple, outline badge, walled input box */
+.oc-y {
+    color: #d9b66b;
+}
+
+.oc-purple {
+    color: #b481d4;
+}
+
+.oc-badge {
+    display: inline-block;
+    width: 0.8em;
+    height: 0.8em;
+    vertical-align: -0.05em;
+    border: 1px solid var(--term-muted);
+}
+
+.oc-input {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    min-height: 4.6em;
+    margin-top: 0.3em;
+    border-left: 0.28em solid #b481d4;
+    border-bottom: 0.18em solid var(--term-border);
+    background: var(--term-active-bg);
+    padding: 0.4em 0.6em;
+}
+
+.oc-status {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 0.35em;
+}
+
+.cc-permission .sel {
+    color: var(--accent);
+    font-weight: 700;
+}
+
+.herdr-ui-mock .dim {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+/* sidebar rows must scale with the mock's clamped font size */
+.herdr-ui-mock .mock-sidebar-title {
+    padding: 0.55em 1.1em;
+}
+
+.herdr-ui-mock .mock-space {
+    padding: 0.55em 1.1em;
+    gap: 0.7em;
+}
+
+.herdr-ui-mock .mock-sidebar-row,
+.herdr-ui-mock .mock-agent-title {
+    padding: 0.45em 1.1em;
+}
+
+.herdr-ui-mock .mock-agent {
+    padding: 0.38em 1.1em;
+    gap: 0.6em;
+}
+
+.herdr-ui-mock .mock-space small,
+.herdr-ui-mock .mock-agent small {
+    margin-top: 0.18em;
+}
+
+.herdr-ui-mock .mock-sidebar-spacer {
+    min-height: 0.2rem;
+}
+
+/* attach: sidebar populates once on load; view switches fade without movement */
+@keyframes mock-attach {
+    from {
+        opacity: 0;
+        transform: translateY(5px);
+    }
+    to {
+        opacity: 1;
+        transform: none;
+    }
+}
+
+@keyframes mock-swap {
+    from {
+        opacity: 0;
+    }
+    to {
+        opacity: 1;
+    }
+}
+
+.herdr-ui-mock .mock-sidebar > * {
+    animation: mock-attach 0.3s ease backwards;
+}
+
+.herdr-ui-mock .mock-sidebar > *:nth-child(1) { animation-delay: 0.05s; }
+.herdr-ui-mock .mock-sidebar > *:nth-child(2) { animation-delay: 0.12s; }
+.herdr-ui-mock .mock-sidebar > *:nth-child(3) { animation-delay: 0.19s; }
+.herdr-ui-mock .mock-sidebar > *:nth-child(4) { animation-delay: 0.26s; }
+.herdr-ui-mock .mock-sidebar > *:nth-child(6) { animation-delay: 0.33s; }
+.herdr-ui-mock .mock-sidebar > *:nth-child(7) { animation-delay: 0.4s; }
+.herdr-ui-mock .mock-sidebar > *:nth-child(8) { animation-delay: 0.47s; }
+.herdr-ui-mock .mock-sidebar > *:nth-child(9) { animation-delay: 0.54s; }
+.herdr-ui-mock .mock-sidebar > *:nth-child(10) { animation-delay: 0.61s; }
+.herdr-ui-mock .mock-sidebar > *:nth-child(11) { animation-delay: 0.68s; }
+.herdr-ui-mock .mock-sidebar > *:nth-child(12) { animation-delay: 0.75s; }
+
+.mock-view.active .mock-panes.active .mock-pane {
+    animation: mock-swap 0.18s ease backwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .herdr-ui-mock .mock-sidebar > *,
+    .mock-view.active .mock-tabs,
+    .mock-view.active .mock-pane {
+        animation: none;
     }
 }

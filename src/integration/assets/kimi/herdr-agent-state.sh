@@ -3,7 +3,7 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=kimi
-# HERDR_INTEGRATION_VERSION=2
+# HERDR_INTEGRATION_VERSION=3
 
 set -eu
 
@@ -13,7 +13,7 @@ trap 'rm -f "$hook_input_file"' EXIT HUP INT TERM
 cat >"$hook_input_file" 2>/dev/null || true
 
 case "$action" in
-  session) ;;
+  session|working|blocked|idle|release) ;;
   *) exit 0 ;;
 esac
 
@@ -30,6 +30,8 @@ import socket
 import time
 
 source = "herdr:kimi"
+agent = "kimi"
+action = os.environ.get("HERDR_ACTION", "")
 pane_id = os.environ.get("HERDR_PANE_ID")
 socket_path = os.environ.get("HERDR_SOCKET_PATH")
 hook_input_file = os.environ.get("HERDR_HOOK_INPUT_FILE")
@@ -48,22 +50,50 @@ if hook_input_file:
         hook_input = {}
 
 session_id = hook_input.get("session_id")
-if not isinstance(session_id, str) or not session_id:
-    raise SystemExit(0)
-
+agent_session_id = session_id if isinstance(session_id, str) and session_id else None
 request_id = f"{source}:{int(time.time() * 1000)}:{random.randrange(1_000_000):06d}"
 report_seq = time.time_ns()
-request = {
-    "id": request_id,
-    "method": "pane.report_agent_session",
-    "params": {
+
+if action == "release":
+    request = {
+        "id": request_id,
+        "method": "pane.release_agent",
+        "params": {
+            "pane_id": pane_id,
+            "source": source,
+            "agent": agent,
+            "seq": report_seq,
+        },
+    }
+elif action == "session":
+    if not agent_session_id:
+        raise SystemExit(0)
+    request = {
+        "id": request_id,
+        "method": "pane.report_agent_session",
+        "params": {
+            "pane_id": pane_id,
+            "source": source,
+            "agent": agent,
+            "agent_session_id": agent_session_id,
+            "seq": report_seq,
+        },
+    }
+else:
+    params = {
         "pane_id": pane_id,
         "source": source,
-        "agent": "kimi",
-        "agent_session_id": session_id,
+        "agent": agent,
+        "state": action,
         "seq": report_seq,
-    },
-}
+    }
+    if agent_session_id:
+        params["agent_session_id"] = agent_session_id
+    request = {
+        "id": request_id,
+        "method": "pane.report_agent",
+        "params": params,
+    }
 
 try:
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

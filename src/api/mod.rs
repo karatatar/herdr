@@ -22,6 +22,7 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
     matches!(
         &request.method,
         Method::ServerReloadConfig(_)
+            | Method::ServerReloadAgentManifests(_)
             | Method::NotificationShow(_)
             | Method::WorkspaceCreate(_)
             | Method::WorkspaceFocus(_)
@@ -34,11 +35,13 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::TabFocus(_)
             | Method::TabRename(_)
             | Method::TabClose(_)
+            | Method::LayoutApply(_)
             | Method::AgentRename(_)
             | Method::AgentFocus(_)
             | Method::AgentStart(_)
             | Method::PaneSplit(_)
             | Method::PaneSwap(_)
+            | Method::PaneMove(_)
             | Method::PaneZoom(_)
             | Method::PaneFocusDirection(_)
             | Method::PaneResize(_)
@@ -49,6 +52,10 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::PaneClearAgentAuthority(_)
             | Method::PaneReleaseAgent(_)
             | Method::PaneClose(_)
+            | Method::PluginActionInvoke(_)
+            | Method::PluginPaneOpen(_)
+            | Method::PluginPaneFocus(_)
+            | Method::PluginPaneClose(_)
     )
 }
 

@@ -3,7 +3,7 @@
 # Run tests
 test:
     cargo nextest run --locked --status-level fail --final-status-level fail --failure-output final --success-output never
-    python3 -m unittest scripts.test_changelog scripts.test_preview scripts.test_vendor_libghostty_vt
+    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_preview scripts.test_vendor_libghostty_vt
 
 # Run one nextest filter, e.g. `just test-one codex_stale_working`
 test-one filter:
@@ -20,7 +20,7 @@ ci filter='all()': lint
 
 # Check formatting + run unit tests + maintenance script tests
 check: ci
-    python3 -m unittest scripts.test_changelog scripts.test_preview scripts.test_vendor_libghostty_vt
+    python3 -m unittest scripts.test_agent_detection_manifest_check scripts.test_changelog scripts.test_preview scripts.test_vendor_libghostty_vt
     @echo "docs reminder: if this changes user-facing behavior, make sure the relevant release docs are updated or called out before release."
 
 # Install repo-local git hooks
@@ -44,6 +44,7 @@ build-libghostty-vt:
 
 # Check that release docs and changelog have been finalized from docs/next before release
 release-docs-check:
+    python3 scripts/agent_detection_manifest_check.py --require-website
     @for file in README.md CHANGELOG.md; do \
         if ! diff -u "$file" "docs/next/$file"; then \
             echo "error: $file differs from docs/next/$file; finalize release docs before releasing"; \

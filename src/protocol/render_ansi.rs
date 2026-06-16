@@ -39,9 +39,6 @@ pub(crate) struct EncodedBlit {
     pub(crate) bytes: Vec<u8>,
     /// Whether this frame was encoded as a full redraw.
     pub(crate) full: bool,
-    /// Cursor reveal bytes to write after a short quiet period.
-    #[cfg(any(windows, test))]
-    pub(crate) deferred_cursor_reveal: Option<Vec<u8>>,
     next_last_visible_cursor: Option<(u16, u16)>,
     next_last_cursor_shape: u8,
 }
@@ -60,24 +57,10 @@ impl BlitEncoder {
     }
 
     pub(crate) fn encode(&self, frame: &FrameData, force_full: bool) -> EncodedBlit {
-        self.encode_inner(frame, force_full, false)
+        self.encode_inner(frame, force_full)
     }
 
-    #[cfg(any(windows, test))]
-    pub(crate) fn encode_with_deferred_cursor_reveal(
-        &self,
-        frame: &FrameData,
-        force_full: bool,
-    ) -> EncodedBlit {
-        self.encode_inner(frame, force_full, true)
-    }
-
-    fn encode_inner(
-        &self,
-        frame: &FrameData,
-        force_full: bool,
-        defer_visible_cursor_during_content_changes: bool,
-    ) -> EncodedBlit {
+    fn encode_inner(&self, frame: &FrameData, force_full: bool) -> EncodedBlit {
         let prev = if force_full {
             None
         } else {
@@ -92,19 +75,13 @@ impl BlitEncoder {
         let mut bytes = Vec::new();
         let mut next_last_visible_cursor = self.last_visible_cursor;
         let mut next_last_cursor_shape = self.last_cursor_shape;
-        let suppress_visible_cursor = defer_visible_cursor_during_content_changes
-            && should_defer_visible_cursor(frame, prev, full);
-        #[cfg(any(windows, test))]
-        let deferred_cursor_reveal = suppress_visible_cursor
-            .then(|| encode_visible_cursor_reveal(frame))
-            .flatten();
         blit_frame_to_with_cursor_memory(
             &mut bytes,
             frame,
             prev,
             &mut next_last_visible_cursor,
             &mut next_last_cursor_shape,
-            suppress_visible_cursor,
+            false,
         );
         if let Some(stats) = prof_stats {
             crate::render_prof::duration_since("ansi_encode.total", prof_started);
@@ -121,8 +98,6 @@ impl BlitEncoder {
         EncodedBlit {
             bytes,
             full,
-            #[cfg(any(windows, test))]
-            deferred_cursor_reveal,
             next_last_visible_cursor,
             next_last_cursor_shape,
         }
@@ -482,21 +457,6 @@ fn repeat_ime_anchor_after_sync() -> bool {
     true
 }
 
-fn should_defer_visible_cursor(frame: &FrameData, prev: Option<&FrameData>, full: bool) -> bool {
-    let cursor_changed = prev.is_some_and(|prev| prev.cursor != frame.cursor);
-    frame_has_cell_changes(frame, prev, full) || cursor_changed
-}
-
-fn frame_has_cell_changes(frame: &FrameData, prev: Option<&FrameData>, full: bool) -> bool {
-    if full {
-        return true;
-    }
-    let Some(prev) = prev else {
-        return true;
-    };
-    compute_prof_blit_stats(frame, Some(prev), false).changed_cells > 0
-}
-
 /// Writes all cells in the frame (full redraw).
 fn cell_width(cell: &CellData) -> usize {
     cell.symbol.width()
@@ -591,22 +551,6 @@ fn write_ime_anchor_cursor_state(writer: &mut impl Write, cursor: HostCursorStat
     } else {
         let _ = writer.write_all(b"\x1b[?25l");
     }
-}
-
-#[cfg(any(windows, test))]
-fn encode_visible_cursor_reveal(frame: &FrameData) -> Option<Vec<u8>> {
-    let cursor = frame.cursor.as_ref()?;
-    if !cursor.visible {
-        return None;
-    }
-
-    let mut bytes = Vec::new();
-    let position = clamp_cursor_position(frame, cursor.x, cursor.y);
-    write_cursor_position(&mut bytes, position);
-    let shape = normalize_cursor_shape(cursor.shape);
-    let _ = write!(bytes, "\x1b[{} q", shape);
-    let _ = bytes.write_all(b"\x1b[?25h");
-    Some(bytes)
 }
 
 fn write_all_cells(writer: &mut impl Write, frame: &FrameData) {
@@ -1074,75 +1018,6 @@ mod tests {
         assert_eq!(
             trailing_cursor, "",
             "should not expose a post-sync cursor repeat when the target terminal flickers on it"
-        );
-    }
-
-    #[test]
-    fn blit_encoder_can_defer_visible_cursor_reveal_for_content_changes() {
-        let frame = FrameData {
-            cells: vec![make_cell("A", 0, 0, 0); 9],
-            width: 3,
-            height: 3,
-            cursor: Some(CursorState {
-                x: 2,
-                y: 1,
-                visible: true,
-                shape: 6,
-            }),
-            hyperlinks: Vec::new(),
-            graphics: Vec::new(),
-        };
-        let encoder = BlitEncoder::new();
-
-        let encoded = encoder.encode_with_deferred_cursor_reveal(&frame, false);
-
-        let output_str = String::from_utf8(encoded.bytes).unwrap();
-        assert!(
-            !output_str.contains("\x1b[?25h"),
-            "active repaint should keep the native cursor hidden"
-        );
-        assert_eq!(
-            encoded.deferred_cursor_reveal.as_deref(),
-            Some(&b"\x1b[2;3H\x1b[6 q\x1b[?25h"[..])
-        );
-    }
-
-    #[test]
-    fn blit_encoder_can_defer_visible_cursor_reveal_for_cursor_only_changes() {
-        let prev = FrameData {
-            cells: vec![make_cell("A", 0, 0, 0); 9],
-            width: 3,
-            height: 3,
-            cursor: Some(CursorState {
-                x: 0,
-                y: 0,
-                visible: true,
-                shape: 0,
-            }),
-            hyperlinks: Vec::new(),
-            graphics: Vec::new(),
-        };
-        let mut curr = prev.clone();
-        curr.cursor = Some(CursorState {
-            x: 2,
-            y: 1,
-            visible: true,
-            shape: 0,
-        });
-        let mut encoder = BlitEncoder::new();
-        let first = encoder.encode(&prev, false);
-        encoder.commit(prev, first);
-
-        let encoded = encoder.encode_with_deferred_cursor_reveal(&curr, false);
-
-        let output_str = String::from_utf8(encoded.bytes).unwrap();
-        assert!(
-            !output_str.contains("\x1b[?25h"),
-            "cursor-only movement should remain hidden until the debounce fires"
-        );
-        assert_eq!(
-            encoded.deferred_cursor_reveal.as_deref(),
-            Some(&b"\x1b[2;3H\x1b[0 q\x1b[?25h"[..])
         );
     }
 

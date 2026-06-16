@@ -7,9 +7,9 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use portable_pty::CommandBuilder;
 use serde_json::{json, Map, Value};
 
-use crate::layout::PaneId;
-
 pub(crate) const HERDR_PANE_ID_ENV_VAR: &str = "HERDR_PANE_ID";
+pub(crate) const HERDR_TAB_ID_ENV_VAR: &str = "HERDR_TAB_ID";
+pub(crate) const HERDR_WORKSPACE_ID_ENV_VAR: &str = "HERDR_WORKSPACE_ID";
 const PI_EXTENSION_INSTALL_NAME: &str = "herdr-agent-state.ts";
 const PI_EXTENSION_ASSET: &str = include_str!("assets/pi/herdr-agent-state.ts");
 const PI_INTEGRATION_VERSION: u32 = 2;
@@ -27,7 +27,7 @@ const CLAUDE_HOOK_ASSET: &str = if cfg!(windows) {
 } else {
     include_str!("assets/claude/herdr-agent-state.sh")
 };
-const CLAUDE_INTEGRATION_VERSION: u32 = 5;
+const CLAUDE_INTEGRATION_VERSION: u32 = 6;
 const CLAUDE_CONFIG_DIR_ENV_VAR: &str = "CLAUDE_CONFIG_DIR";
 const CODEX_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "herdr-agent-state.ps1"
@@ -51,12 +51,23 @@ const KIMI_HOOK_ASSET: &str = if cfg!(windows) {
 } else {
     include_str!("assets/kimi/herdr-agent-state.sh")
 };
-const KIMI_INTEGRATION_VERSION: u32 = 2;
+const KIMI_INTEGRATION_VERSION: u32 = 3;
 const KIMI_CODE_HOME_ENV_VAR: &str = "KIMI_CODE_HOME";
 const KIMI_CONFIG_BLOCK_BEGIN: &str = "# >>> herdr kimi integration";
 const KIMI_CONFIG_BLOCK_END: &str = "# <<< herdr kimi integration";
-const KIMI_MIN_VERSION: &str = "0.8.0";
-const KIMI_HOOK_EVENTS: [(&str, &str); 1] = [("SessionStart", "session")];
+const KIMI_MIN_VERSION: &str = "0.14.0";
+const KIMI_HOOK_EVENTS: [(&str, &str); 10] = [
+    ("SessionStart", "session"),
+    ("UserPromptSubmit", "working"),
+    ("PreToolUse", "working"),
+    ("SubagentStart", "working"),
+    ("PreCompact", "working"),
+    ("PermissionRequest", "blocked"),
+    ("PermissionResult", "working"),
+    ("Stop", "idle"),
+    ("Interrupt", "idle"),
+    ("SessionEnd", "release"),
+];
 const COPILOT_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "herdr-agent-state.ps1"
 } else {
@@ -80,6 +91,25 @@ const COPILOT_REMOVED_LIFECYCLE_HOOK_EVENTS: [&str; 9] = [
     "SessionEnd",
     "notification",
     "sessionStart",
+];
+const DEVIN_HOOK_INSTALL_NAME: &str = "herdr-agent-state.sh";
+const DEVIN_HOOK_ASSET: &str = include_str!("assets/devin/herdr-agent-state.sh");
+const DEVIN_INTEGRATION_VERSION: u32 = 1;
+const DEVIN_HOOK_EVENTS: [(&str, &str); 6] = [
+    ("SessionStart", "session"),
+    ("UserPromptSubmit", "session"),
+    ("PreToolUse", "session"),
+    ("PostToolUse", "session"),
+    ("PermissionRequest", "session"),
+    ("Stop", "session"),
+];
+const DEVIN_REMOVED_LIFECYCLE_HOOK_EVENTS: [(&str, &str); 6] = [
+    ("UserPromptSubmit", "working"),
+    ("PreToolUse", "working"),
+    ("PostToolUse", "working"),
+    ("PermissionRequest", "blocked"),
+    ("Stop", "idle"),
+    ("SessionEnd", "release"),
 ];
 const DROID_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "herdr-agent-state.ps1"
@@ -170,6 +200,12 @@ pub(crate) struct KimiInstallPaths {
 
 #[derive(Debug)]
 pub(crate) struct CopilotInstallPaths {
+    pub hook_path: PathBuf,
+    pub settings_path: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct DevinInstallPaths {
     pub hook_path: PathBuf,
     pub settings_path: PathBuf,
 }
@@ -320,6 +356,14 @@ pub(crate) struct CopilotUninstallResult {
 }
 
 #[derive(Debug)]
+pub(crate) struct DevinUninstallResult {
+    pub hook_path: PathBuf,
+    pub settings_path: PathBuf,
+    pub removed_hook_file: bool,
+    pub updated_settings: bool,
+}
+
+#[derive(Debug)]
 pub(crate) struct DroidUninstallResult {
     pub hook_path: PathBuf,
     pub hooks_path: PathBuf,
@@ -349,14 +393,103 @@ pub(crate) struct HermesUninstallResult {
     pub updated_config: bool,
 }
 
-pub(crate) fn apply_pane_env(cmd: &mut CommandBuilder, pane_id: PaneId) {
+pub(crate) fn apply_pane_base_env(cmd: &mut CommandBuilder) {
     cmd.env(crate::api::SOCKET_PATH_ENV_VAR, crate::api::socket_path());
-    cmd.env(HERDR_PANE_ID_ENV_VAR, format!("p_{}", pane_id.raw()));
+}
+
+pub(crate) const INSTALL_WARNING_PREFIX: &str = "warning:";
+
+struct AgentVersionRequirement {
+    label: &'static str,
+    binary: &'static str,
+    args: &'static [&'static str],
+    min_version: &'static str,
+}
+
+fn agent_version_requirement(
+    target: crate::api::schema::IntegrationTarget,
+) -> Option<AgentVersionRequirement> {
+    match target {
+        crate::api::schema::IntegrationTarget::Kimi => Some(AgentVersionRequirement {
+            label: "kimi code",
+            binary: "kimi",
+            args: &["--version"],
+            min_version: KIMI_MIN_VERSION,
+        }),
+        _ => None,
+    }
+}
+
+fn extract_version_triple(text: &str) -> Option<(u64, u64, u64)> {
+    text.split_whitespace().find_map(|token| {
+        let token = token.trim_start_matches('v');
+        let mut parts = token.splitn(3, '.');
+        let major: u64 = parts.next()?.parse().ok()?;
+        let minor: u64 = parts.next()?.parse().ok()?;
+        let patch: u64 = parts
+            .next()
+            .map(|rest| {
+                rest.chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+            })
+            .and_then(|digits| digits.parse().ok())
+            .unwrap_or(0);
+        Some((major, minor, patch))
+    })
+}
+
+/// Returns `Ok(None)` when the installed agent satisfies the requirement,
+/// `Ok(Some(warning))` when the version cannot be determined (install
+/// proceeds), and `Err` when the installed agent is too old.
+fn enforce_agent_version(requirement: &AgentVersionRequirement) -> io::Result<Option<String>> {
+    let probe = format!("{} {}", requirement.binary, requirement.args.join(" "));
+    let output = match std::process::Command::new(requirement.binary)
+        .args(requirement.args)
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => {
+            return Ok(Some(format!(
+                "{INSTALL_WARNING_PREFIX} could not run `{probe}` to verify the installed version; hooks require {} {} or newer",
+                requirement.label, requirement.min_version
+            )));
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let Some(found) = extract_version_triple(&stdout) else {
+        return Ok(Some(format!(
+            "{INSTALL_WARNING_PREFIX} could not parse the {} version from `{probe}` output; hooks require {} {} or newer",
+            requirement.label, requirement.label, requirement.min_version
+        )));
+    };
+    let required = extract_version_triple(requirement.min_version)
+        .expect("static min version must be a valid version triple");
+
+    if found < required {
+        return Err(io::Error::other(format!(
+            "{label} {}.{}.{} is too old: herdr hooks require {label} {min} or newer. upgrade {label}, then re-run install",
+            found.0,
+            found.1,
+            found.2,
+            label = requirement.label,
+            min = requirement.min_version
+        )));
+    }
+    Ok(None)
 }
 
 pub(crate) fn install_target(
     target: crate::api::schema::IntegrationTarget,
 ) -> io::Result<Vec<String>> {
+    let result = install_target_inner(target);
+    let outcome = if result.is_ok() { "ok" } else { "error" };
+    crate::logging::integration_action("install", integration_target_label(target), outcome);
+    result
+}
+
+fn install_target_inner(target: crate::api::schema::IntegrationTarget) -> io::Result<Vec<String>> {
     if !integration_target_supported(target) {
         return Err(io::Error::other(format!(
             "{} integration is not supported on Windows",
@@ -364,7 +497,12 @@ pub(crate) fn install_target(
         )));
     }
 
-    let messages = match target {
+    let version_warning = match agent_version_requirement(target) {
+        Some(requirement) => enforce_agent_version(&requirement)?,
+        None => None,
+    };
+
+    let mut messages = match target {
         crate::api::schema::IntegrationTarget::Pi => {
             let path = install_pi()?;
             vec![format!("installed pi integration to {}", path.display())]
@@ -423,6 +561,19 @@ pub(crate) fn install_target(
                 ),
                 format!(
                     "ensured copilot settings at {}",
+                    installed.settings_path.display()
+                ),
+            ]
+        }
+        crate::api::schema::IntegrationTarget::Devin => {
+            let installed = install_devin()?;
+            vec![
+                format!(
+                    "installed devin integration hook to {}",
+                    installed.hook_path.display()
+                ),
+                format!(
+                    "ensured devin settings at {}",
                     installed.settings_path.display()
                 ),
             ]
@@ -510,7 +661,10 @@ pub(crate) fn install_target(
         }
     };
 
-    crate::logging::integration_action("install", integration_target_label(target), "ok");
+    if let Some(warning) = version_warning {
+        messages.push(warning);
+    }
+
     Ok(messages)
 }
 
@@ -626,6 +780,33 @@ pub(crate) fn uninstall_target(
             } else {
                 messages.push(format!(
                     "no herdr copilot hook entries found in {}",
+                    result.settings_path.display()
+                ));
+            }
+            messages
+        }
+        crate::api::schema::IntegrationTarget::Devin => {
+            let result = uninstall_devin()?;
+            let mut messages = Vec::new();
+            if result.removed_hook_file {
+                messages.push(format!(
+                    "removed devin hook at {}",
+                    result.hook_path.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "no devin hook found at {}",
+                    result.hook_path.display()
+                ));
+            }
+            if result.updated_settings {
+                messages.push(format!(
+                    "removed herdr devin hook entries from {}",
+                    result.settings_path.display()
+                ));
+            } else {
+                messages.push(format!(
+                    "no herdr devin hook entries found in {}",
                     result.settings_path.display()
                 ));
             }
@@ -820,6 +1001,7 @@ pub(crate) fn integration_target_label(
         crate::api::schema::IntegrationTarget::Claude => "claude",
         crate::api::schema::IntegrationTarget::Codex => "codex",
         crate::api::schema::IntegrationTarget::Copilot => "copilot",
+        crate::api::schema::IntegrationTarget::Devin => "devin",
         crate::api::schema::IntegrationTarget::Droid => "droid",
         crate::api::schema::IntegrationTarget::Kimi => "kimi",
         crate::api::schema::IntegrationTarget::Opencode => "opencode",
@@ -843,6 +1025,7 @@ fn integration_target_command_names(
         crate::api::schema::IntegrationTarget::Claude => &["claude"],
         crate::api::schema::IntegrationTarget::Codex => &["codex"],
         crate::api::schema::IntegrationTarget::Copilot => &["copilot"],
+        crate::api::schema::IntegrationTarget::Devin => &["devin"],
         crate::api::schema::IntegrationTarget::Droid => &["droid"],
         crate::api::schema::IntegrationTarget::Kimi => &["kimi"],
         crate::api::schema::IntegrationTarget::Opencode => &["opencode"],
@@ -1054,7 +1237,7 @@ fn integration_specs() -> [(
     crate::api::schema::IntegrationTarget,
     io::Result<PathBuf>,
     u32,
-); 12] {
+); 13] {
     [
         (
             crate::api::schema::IntegrationTarget::Pi,
@@ -1080,6 +1263,11 @@ fn integration_specs() -> [(
             crate::api::schema::IntegrationTarget::Copilot,
             copilot_dir().map(|dir| dir.join("hooks").join(COPILOT_HOOK_INSTALL_NAME)),
             COPILOT_INTEGRATION_VERSION,
+        ),
+        (
+            crate::api::schema::IntegrationTarget::Devin,
+            devin_dir().map(|dir| dir.join(DEVIN_HOOK_INSTALL_NAME)),
+            DEVIN_INTEGRATION_VERSION,
         ),
         (
             crate::api::schema::IntegrationTarget::Droid,
@@ -1474,6 +1662,62 @@ pub(crate) fn install_copilot() -> io::Result<CopilotInstallPaths> {
     })
 }
 
+pub(crate) fn install_devin() -> io::Result<DevinInstallPaths> {
+    let dir = devin_dir()?;
+    if !dir.is_dir() {
+        return Err(io::Error::other(format!(
+            "devin config directory not found at {}. install devin cli first",
+            dir.display()
+        )));
+    }
+
+    let hook_path = dir.join(DEVIN_HOOK_INSTALL_NAME);
+    fs::write(&hook_path, DEVIN_HOOK_ASSET)?;
+    make_executable(&hook_path)?;
+
+    let settings_path = dir.join("config.json");
+    let mut settings = if settings_path.is_file() {
+        serde_json::from_str::<Value>(&fs::read_to_string(&settings_path)?).map_err(|err| {
+            io::Error::other(format!(
+                "failed to parse {}: {err}",
+                settings_path.display()
+            ))
+        })?
+    } else {
+        json!({})
+    };
+
+    let hooks = ensure_hooks_object(
+        &mut settings,
+        &settings_path,
+        "devin settings",
+        "devin settings hooks",
+    )?;
+    for (event, action) in DEVIN_REMOVED_LIFECYCLE_HOOK_EVENTS {
+        remove_hook_commands(hooks, event, &hook_path, Some(action))?;
+    }
+    for (event, action) in DEVIN_HOOK_EVENTS {
+        remove_hook_commands(hooks, event, &hook_path, Some(action))?;
+    }
+    for (event, action) in DEVIN_HOOK_EVENTS {
+        ensure_command_hook(
+            hooks,
+            event,
+            hook_command(&hook_path, Some(action)),
+            10,
+            None,
+        )?;
+    }
+    remove_legacy_bash_hook_file(&hook_path)?;
+
+    fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
+
+    Ok(DevinInstallPaths {
+        hook_path,
+        settings_path,
+    })
+}
+
 pub(crate) fn install_droid() -> io::Result<DroidInstallPaths> {
     let dir = droid_dir()?;
     if !dir.is_dir() {
@@ -1826,6 +2070,51 @@ pub(crate) fn uninstall_copilot() -> io::Result<CopilotUninstallResult> {
         remove_file_if_exists(&hook_path)? | remove_legacy_bash_hook_file(&hook_path)?;
 
     Ok(CopilotUninstallResult {
+        hook_path,
+        settings_path,
+        removed_hook_file,
+        updated_settings,
+    })
+}
+
+pub(crate) fn uninstall_devin() -> io::Result<DevinUninstallResult> {
+    let devin_dir = devin_dir()?;
+    let hook_path = devin_dir.join(DEVIN_HOOK_INSTALL_NAME);
+    let settings_path = devin_dir.join("config.json");
+    let mut updated_settings = false;
+
+    if settings_path.is_file() {
+        let mut settings = serde_json::from_str::<Value>(&fs::read_to_string(&settings_path)?)
+            .map_err(|err| {
+                io::Error::other(format!(
+                    "failed to parse {}: {err}",
+                    settings_path.display()
+                ))
+            })?;
+
+        if let Some(hooks) = hooks_object_if_present(
+            &mut settings,
+            &settings_path,
+            "devin settings",
+            "devin settings hooks",
+        )? {
+            for (event, action) in DEVIN_REMOVED_LIFECYCLE_HOOK_EVENTS {
+                updated_settings |= remove_hook_commands(hooks, event, &hook_path, Some(action))?;
+            }
+            for (event, action) in DEVIN_HOOK_EVENTS {
+                updated_settings |= remove_hook_commands(hooks, event, &hook_path, Some(action))?;
+            }
+        }
+
+        if updated_settings {
+            fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
+        }
+    }
+
+    let removed_hook_file =
+        remove_file_if_exists(&hook_path)? | remove_legacy_bash_hook_file(&hook_path)?;
+
+    Ok(DevinUninstallResult {
         hook_path,
         settings_path,
         removed_hook_file,
@@ -3093,6 +3382,14 @@ fn copilot_dir() -> io::Result<PathBuf> {
     config_dir_from_env_or_home(COPILOT_HOME_ENV_VAR, &[".copilot"])
 }
 
+fn devin_dir() -> io::Result<PathBuf> {
+    if let Some(value) = std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+        return expand_tilde_path(PathBuf::from(value)).map(|path| path.join("devin"));
+    }
+
+    Ok(home_dir()?.join(".config").join("devin"))
+}
+
 fn droid_dir() -> io::Result<PathBuf> {
     Ok(home_dir()?.join(".factory"))
 }
@@ -3193,12 +3490,93 @@ pub(crate) fn integration_env_lock() -> MutexGuard<'static, ()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn extract_version_triple_parses_common_outputs() {
+        assert_eq!(extract_version_triple("0.14.0"), Some((0, 14, 0)));
+        assert_eq!(extract_version_triple("v1.2.3"), Some((1, 2, 3)));
+        assert_eq!(
+            extract_version_triple("kimi-code 0.14.0 (linux/x64)"),
+            Some((0, 14, 0))
+        );
+        assert_eq!(extract_version_triple("0.14"), Some((0, 14, 0)));
+        assert_eq!(extract_version_triple("0.14.1-beta.2"), Some((0, 14, 1)));
+        assert_eq!(extract_version_triple("no version here"), None);
+        assert_eq!(extract_version_triple(""), None);
+    }
+
+    #[test]
+    fn extract_version_triple_orders_versions() {
+        let old = extract_version_triple("0.12.1").unwrap();
+        let min = extract_version_triple(KIMI_MIN_VERSION).unwrap();
+        let new = extract_version_triple("0.15.0").unwrap();
+        assert!(old < min);
+        assert!(min <= min);
+        assert!(min < new);
+    }
+
+    #[test]
+    fn agent_version_requirement_only_set_for_kimi() {
+        let requirement = agent_version_requirement(crate::api::schema::IntegrationTarget::Kimi)
+            .expect("kimi must have a version requirement");
+        assert_eq!(requirement.binary, "kimi");
+        assert_eq!(requirement.min_version, KIMI_MIN_VERSION);
+        assert!(agent_version_requirement(crate::api::schema::IntegrationTarget::Claude).is_none());
+        assert!(agent_version_requirement(crate::api::schema::IntegrationTarget::Codex).is_none());
+    }
+
+    #[test]
+    fn enforce_agent_version_warns_when_binary_missing() {
+        let requirement = AgentVersionRequirement {
+            label: "kimi code",
+            binary: "herdr-test-binary-that-does-not-exist",
+            args: &["--version"],
+            min_version: "0.14.0",
+        };
+        let warning = enforce_agent_version(&requirement)
+            .expect("missing binary must not fail the install")
+            .expect("missing binary must produce a warning");
+        assert!(warning.contains("could not run"));
+        assert!(warning.contains("0.14.0"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enforce_agent_version_rejects_old_version() {
+        let requirement = AgentVersionRequirement {
+            label: "kimi code",
+            binary: "echo",
+            args: &["0.12.1"],
+            min_version: "0.14.0",
+        };
+        let err =
+            enforce_agent_version(&requirement).expect_err("old version must fail the install");
+        let message = err.to_string();
+        assert!(message.contains("0.12.1"));
+        assert!(message.contains("0.14.0"));
+        assert!(message.contains("upgrade"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enforce_agent_version_accepts_current_version() {
+        let requirement = AgentVersionRequirement {
+            label: "kimi code",
+            binary: "echo",
+            args: &["0.14.0"],
+            min_version: "0.14.0",
+        };
+        let result = enforce_agent_version(&requirement)
+            .expect("matching version must not fail the install");
+        assert!(result.is_none(), "matching version must not warn");
+    }
+
     fn clear_integration_path_env() {
         std::env::remove_var(PI_CODING_AGENT_DIR_ENV_VAR);
         std::env::remove_var(CLAUDE_CONFIG_DIR_ENV_VAR);
         std::env::remove_var(CODEX_HOME_ENV_VAR);
         std::env::remove_var(COPILOT_HOME_ENV_VAR);
         std::env::remove_var(KIMI_CODE_HOME_ENV_VAR);
+        std::env::remove_var("XDG_CONFIG_HOME");
         std::env::remove_var(QODERCLI_CONFIG_DIR_ENV_VAR);
         std::env::remove_var(CURSOR_CONFIG_DIR_ENV_VAR);
     }
@@ -3274,6 +3652,7 @@ mod tests {
         assert!(!integration_target_supported(IntegrationTarget::Kilo));
         assert!(!integration_target_supported(IntegrationTarget::Hermes));
         assert!(!integration_target_supported(IntegrationTarget::Cursor));
+        assert!(!integration_target_supported(IntegrationTarget::Devin));
 
         assert!(integration_target_supported(IntegrationTarget::Claude));
         assert!(integration_target_supported(IntegrationTarget::Codex));
@@ -3301,6 +3680,7 @@ mod tests {
         fs::write(bin.join("kilo.cmd"), "@echo off\r\n").unwrap();
         fs::write(bin.join("hermes.exe"), "").unwrap();
         fs::write(bin.join("cursor-agent.cmd"), "@echo off\r\n").unwrap();
+        fs::write(bin.join("devin.cmd"), "@echo off\r\n").unwrap();
 
         assert!(!integration_target_available(IntegrationTarget::Pi));
         assert!(!integration_target_available(IntegrationTarget::Omp));
@@ -3308,6 +3688,7 @@ mod tests {
         assert!(!integration_target_available(IntegrationTarget::Kilo));
         assert!(!integration_target_available(IntegrationTarget::Hermes));
         assert!(!integration_target_available(IntegrationTarget::Cursor));
+        assert!(!integration_target_available(IntegrationTarget::Devin));
 
         if let Some(path) = original_path {
             std::env::set_var("PATH", path);
@@ -4053,7 +4434,7 @@ mod tests {
 
         assert_eq!(claude.path, hook_path);
         assert_eq!(claude.installed_version, Some(1));
-        assert_eq!(claude.expected_version, 5);
+        assert_eq!(claude.expected_version, 6);
         assert_eq!(claude.state, IntegrationStatusKind::Outdated);
 
         std::env::remove_var("HOME");
@@ -4083,7 +4464,7 @@ mod tests {
 
         assert_eq!(claude.path, hook_path);
         assert_eq!(claude.installed_version, Some(2));
-        assert_eq!(claude.expected_version, 5);
+        assert_eq!(claude.expected_version, 6);
         assert_eq!(claude.state, IntegrationStatusKind::Outdated);
 
         std::env::remove_var("HOME");
@@ -4745,6 +5126,241 @@ mod tests {
     }
 
     #[test]
+    fn install_devin_writes_hook_and_updates_settings() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let xdg_config = base.join("xdg");
+        let devin_dir = xdg_config.join("devin");
+        fs::create_dir_all(&devin_dir).unwrap();
+        fs::write(
+            devin_dir.join("config.json"),
+            r#"{"theme_mode":"dark","hooks":{}}"#,
+        )
+        .unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", &xdg_config);
+        std::env::set_var("HOME", base.join("home"));
+
+        let installed = install_devin().unwrap();
+        let hook_content = fs::read_to_string(&installed.hook_path).unwrap();
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(&installed.settings_path).unwrap()).unwrap();
+
+        assert_eq!(installed.hook_path, devin_dir.join(DEVIN_HOOK_INSTALL_NAME));
+        assert_eq!(installed.settings_path, devin_dir.join("config.json"));
+        assert_eq!(hook_content, DEVIN_HOOK_ASSET);
+        assert_eq!(settings["theme_mode"], "dark");
+        for (event, action) in DEVIN_HOOK_EVENTS {
+            let command = settings["hooks"][event][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap();
+            assert!(
+                command.contains(DEVIN_HOOK_INSTALL_NAME) && command.ends_with(action),
+                "expected devin {event} hook command to end with {action}, got {command}"
+            );
+        }
+
+        clear_integration_path_env();
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_devin_is_idempotent_for_hook_entries() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let xdg_config = base.join("xdg");
+        let devin_dir = xdg_config.join("devin");
+        fs::create_dir_all(&devin_dir).unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", &xdg_config);
+        std::env::set_var("HOME", base.join("home"));
+
+        install_devin().unwrap();
+        install_devin().unwrap();
+
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(devin_dir.join("config.json")).unwrap())
+                .unwrap();
+        for (event, _) in DEVIN_HOOK_EVENTS {
+            assert_eq!(
+                settings["hooks"][event].as_array().unwrap().len(),
+                1,
+                "expected hooks.{event} to be idempotent"
+            );
+        }
+
+        clear_integration_path_env();
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_devin_removes_legacy_lifecycle_hook_entries() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let xdg_config = base.join("xdg");
+        let devin_dir = xdg_config.join("devin");
+        fs::create_dir_all(&devin_dir).unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", &xdg_config);
+        std::env::set_var("HOME", base.join("home"));
+
+        let hook_path = devin_dir.join(DEVIN_HOOK_INSTALL_NAME);
+        let mut hooks = Map::new();
+        for (event, action) in DEVIN_REMOVED_LIFECYCLE_HOOK_EVENTS {
+            hooks.insert(
+                event.to_string(),
+                json!([
+                    {
+                        "hooks": [{
+                            "type": "command",
+                            "command": hook_command(&hook_path, Some(action)),
+                            "timeout": 10
+                        }]
+                    }
+                ]),
+            );
+        }
+        fs::write(
+            devin_dir.join("config.json"),
+            serde_json::to_string_pretty(&json!({ "hooks": hooks })).unwrap(),
+        )
+        .unwrap();
+
+        install_devin().unwrap();
+
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(devin_dir.join("config.json")).unwrap())
+                .unwrap();
+        for (event, action) in DEVIN_REMOVED_LIFECYCLE_HOOK_EVENTS {
+            let legacy_command = hook_command(&hook_path, Some(action));
+            let entries = settings["hooks"][event].as_array();
+            assert!(
+                entries.is_none_or(|entries| {
+                    entries.iter().all(|entry| {
+                        entry
+                            .get("hooks")
+                            .and_then(Value::as_array)
+                            .is_none_or(|hooks| {
+                                hooks.iter().all(|hook| {
+                                    hook.get("command").and_then(Value::as_str)
+                                        != Some(legacy_command.as_str())
+                                })
+                            })
+                    })
+                }),
+                "expected legacy devin {event} -> {action} hook to be removed"
+            );
+
+            if !DEVIN_HOOK_EVENTS
+                .iter()
+                .any(|(installed_event, _)| installed_event == &event)
+            {
+                continue;
+            }
+
+            let session_command = hook_command(&hook_path, Some("session"));
+            let entries = entries.unwrap();
+            assert!(
+                entries.iter().any(|entry| {
+                    entry
+                        .get("hooks")
+                        .and_then(Value::as_array)
+                        .is_some_and(|hooks| {
+                            hooks.iter().any(|hook| {
+                                hook.get("command").and_then(Value::as_str)
+                                    == Some(session_command.as_str())
+                            })
+                        })
+                }),
+                "expected devin {event} session hook to be installed"
+            );
+        }
+
+        clear_integration_path_env();
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn uninstall_devin_removes_herdr_hooks_and_preserves_others() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let xdg_config = base.join("xdg");
+        let devin_dir = xdg_config.join("devin");
+        fs::create_dir_all(&devin_dir).unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", &xdg_config);
+        std::env::set_var("HOME", base.join("home"));
+
+        install_devin().unwrap();
+
+        let hook_path = devin_dir.join(DEVIN_HOOK_INSTALL_NAME);
+        let mut settings: Value =
+            serde_json::from_str(&fs::read_to_string(devin_dir.join("config.json")).unwrap())
+                .unwrap();
+        settings["hooks"]["UserPromptSubmit"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": "echo keep",
+                    "timeout": 10
+                }]
+            }));
+        fs::write(
+            devin_dir.join("config.json"),
+            serde_json::to_string_pretty(&settings).unwrap(),
+        )
+        .unwrap();
+
+        let result = uninstall_devin().unwrap();
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(devin_dir.join("config.json")).unwrap())
+                .unwrap();
+
+        assert!(result.removed_hook_file);
+        assert!(result.updated_settings);
+        assert!(!hook_path.exists());
+        assert_eq!(
+            settings["hooks"]["UserPromptSubmit"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
+            "echo keep"
+        );
+        assert!(settings["hooks"].get("SessionStart").is_none());
+        assert!(settings["hooks"].get("PreToolUse").is_none());
+        assert!(settings["hooks"].get("PermissionRequest").is_none());
+        assert!(settings["hooks"].get("Stop").is_none());
+        assert!(settings["hooks"].get("SessionEnd").is_none());
+
+        clear_integration_path_env();
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn install_devin_errors_when_config_dir_missing() {
+        let _lock = integration_env_lock();
+        let base = unique_base();
+        let xdg_config = base.join("xdg");
+        fs::create_dir_all(&xdg_config).unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", &xdg_config);
+        std::env::set_var("HOME", base.join("home"));
+
+        let err = install_devin().unwrap_err().to_string();
+        assert!(err.contains("devin config directory not found"));
+
+        clear_integration_path_env();
+        std::env::remove_var("HOME");
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
     fn install_droid_writes_hook_to_settings_and_cleans_legacy_hooks_json() {
         let _lock = integration_env_lock();
         let base = unique_base();
@@ -5354,6 +5970,8 @@ mod tests {
         assert!(PI_EXTENSION_ASSET.contains("agent_session_id: currentAgentSessionId"));
         assert!(PI_EXTENSION_ASSET.contains("publishState(true)"));
         assert!(CLAUDE_HOOK_ASSET.contains("agent_session_id"));
+        assert!(CLAUDE_HOOK_ASSET.contains("agent_session_path"));
+        assert!(CLAUDE_HOOK_ASSET.contains("session_start_source"));
         assert!(CLAUDE_HOOK_ASSET.contains("pane.report_agent_session"));
         assert!(!CLAUDE_HOOK_ASSET.contains("\"state\": action"));
         assert!(!CLAUDE_HOOK_ASSET.contains("pane.release_agent"));
@@ -5365,12 +5983,18 @@ mod tests {
         assert!(KIMI_HOOK_ASSET.contains("source = \"herdr:kimi\""));
         assert!(KIMI_HOOK_ASSET.contains("agent_session_id"));
         assert!(KIMI_HOOK_ASSET.contains("pane.report_agent_session"));
-        assert!(!KIMI_HOOK_ASSET.contains("\"state\": action"));
-        assert!(!KIMI_HOOK_ASSET.contains("pane.release_agent"));
+        assert!(KIMI_HOOK_ASSET.contains("\"state\": action"));
+        assert!(KIMI_HOOK_ASSET.contains("pane.release_agent"));
         assert!(COPILOT_HOOK_ASSET.contains("agent_session_id"));
         assert!(COPILOT_HOOK_ASSET.contains("pane.report_agent_session"));
         assert!(!COPILOT_HOOK_ASSET.contains("\"state\":"));
         assert!(!COPILOT_HOOK_ASSET.contains("pane.release_agent"));
+        assert!(DEVIN_HOOK_ASSET.contains("HERDR_DEVIN_LIST_JSON"));
+        assert!(DEVIN_HOOK_ASSET.contains("\"method\": \"pane.report_agent_session\""));
+        assert!(!DEVIN_HOOK_ASSET.contains("\"method\": \"pane.report_agent\""));
+        assert!(!DEVIN_HOOK_ASSET.contains("\"state\":"));
+        assert!(!DEVIN_HOOK_ASSET.contains("pane.release_agent"));
+        assert!(DEVIN_HOOK_ASSET.contains("agent_session_id"));
         assert!(DROID_HOOK_ASSET.contains("agent_session_id"));
         assert!(DROID_HOOK_ASSET.contains("pane.report_agent_session"));
         assert!(!DROID_HOOK_ASSET.contains("\"state\": action"));

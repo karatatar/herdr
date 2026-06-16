@@ -18,11 +18,26 @@ use crate::{
     config::ToastDelivery,
 };
 
+pub(crate) const SETTINGS_POPUP_WIDTH: u16 = 76;
+pub(crate) const SETTINGS_POPUP_BASE_HEIGHT: u16 = 22;
+
+pub(crate) fn settings_popup_height(app: &AppState) -> u16 {
+    if app.settings.section != crate::app::state::SettingsSection::Integrations {
+        return SETTINGS_POPUP_BASE_HEIGHT;
+    }
+    let list_rows = app.integration_recommendations.len().max(1) as u16;
+    let footer_rows = integrations_footer_height(app, SETTINGS_POPUP_WIDTH - 2);
+    // borders 2 + header 3 + stack gaps 2 + modal footer 2
+    // + section title 1 + description 2 + spacers 2
+    (14 + list_rows + footer_rows).max(SETTINGS_POPUP_BASE_HEIGHT)
+}
+
 pub(super) fn render_settings_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     use crate::app::state::SettingsSection;
 
     let p = &app.palette;
-    let Some(popup) = centered_popup_rect(area, 76, 22) else {
+    let Some(popup) = centered_popup_rect(area, SETTINGS_POPUP_WIDTH, settings_popup_height(app))
+    else {
         return;
     };
 
@@ -194,11 +209,13 @@ pub(crate) fn settings_primary_button_label(
 }
 
 pub(crate) fn settings_show_primary_action(app: &AppState) -> bool {
-    app.settings.section != crate::app::state::SettingsSection::Integrations
-        || app
+    match app.settings.section {
+        crate::app::state::SettingsSection::Integrations => app
             .integration_recommendations
             .iter()
-            .any(crate::integration::IntegrationRecommendation::needs_install)
+            .any(crate::integration::IntegrationRecommendation::needs_install),
+        _ => true,
+    }
 }
 
 pub(crate) fn settings_button_rects(
@@ -237,15 +254,58 @@ pub(crate) fn settings_button_rects(
     (Some(rects[0]), rects[1])
 }
 
+fn integrations_footer_paragraph(app: &AppState) -> Paragraph<'static> {
+    let p = &app.palette;
+    let mut footer_lines = Vec::new();
+    if !app.integration_install_messages.is_empty() {
+        for message in &app.integration_install_messages {
+            footer_lines.push(Line::from(Span::styled(
+                format!(" {message}"),
+                Style::default().fg(p.overlay1),
+            )));
+        }
+    } else {
+        let found_any = app.integration_recommendations.iter().any(|item| {
+            item.available || item.state != crate::integration::IntegrationStatusKind::NotInstalled
+        });
+        let hint = if app
+            .integration_recommendations
+            .iter()
+            .any(crate::integration::IntegrationRecommendation::needs_install)
+        {
+            " press install to add available or outdated integrations"
+        } else if found_any {
+            " all detected integrations are installed"
+        } else {
+            " no supported agent CLIs found on PATH"
+        };
+        footer_lines.push(Line::from(Span::styled(
+            hint.to_string(),
+            Style::default().fg(p.overlay1),
+        )));
+    }
+    Paragraph::new(footer_lines).wrap(ratatui::widgets::Wrap { trim: false })
+}
+
+fn integrations_footer_height(app: &AppState, width: u16) -> u16 {
+    (integrations_footer_paragraph(app).line_count(width) as u16).min(6)
+}
+
 fn render_settings_integrations(app: &AppState, frame: &mut Frame, area: Rect) {
     let p = &app.palette;
+
+    let footer = integrations_footer_paragraph(app);
+    let footer_height = integrations_footer_height(app, area.width);
+
     let rows = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(2),
         Constraint::Length(1),
         Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(footer_height),
     ])
-    .areas::<4>(area);
+    .areas::<6>(area);
 
     frame.render_widget(
         Paragraph::new("agent integrations")
@@ -296,37 +356,8 @@ fn render_settings_integrations(app: &AppState, frame: &mut Frame, area: Rect) {
         )));
     }
 
-    if !app.integration_install_messages.is_empty() {
-        lines.push(Line::from(""));
-        for message in &app.integration_install_messages {
-            lines.push(Line::from(Span::styled(
-                format!(" {message}"),
-                Style::default().fg(p.overlay1),
-            )));
-        }
-    } else {
-        lines.push(Line::from(""));
-        let found_any = app.integration_recommendations.iter().any(|item| {
-            item.available || item.state != crate::integration::IntegrationStatusKind::NotInstalled
-        });
-        let hint = if app
-            .integration_recommendations
-            .iter()
-            .any(crate::integration::IntegrationRecommendation::needs_install)
-        {
-            " press install to add available or outdated integrations"
-        } else if found_any {
-            " all detected integrations are installed"
-        } else {
-            " no supported agent CLIs found on PATH"
-        };
-        lines.push(Line::from(Span::styled(
-            hint,
-            Style::default().fg(p.overlay1),
-        )));
-    }
-
     frame.render_widget(Paragraph::new(lines), rows[3]);
+    frame.render_widget(footer, rows[5]);
 }
 
 fn render_settings_theme(app: &AppState, frame: &mut Frame, area: Rect) {

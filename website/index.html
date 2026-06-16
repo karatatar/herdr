@@ -6,7 +6,7 @@
         <title>Herdr — one terminal for the whole herd</title>
         <meta
             name="description"
-            content="Terminal-native agent runtime and multiplexer. Run AI coding agents in real panes, detach and reattach, SSH in, see state, and orchestrate through the CLI/socket API."
+            content="Herdr is to coding agents what tmux is to terminals: an agent multiplexer that runs where your agents run. Real panes, agent state at a glance, ssh from anywhere, no app."
         />
         <meta name="theme-color" content="#f0eee9" />
         <link rel="canonical" href="https://herdr.dev/" />
@@ -16,12 +16,12 @@
         <meta property="og:title" content="Herdr — one terminal for the whole herd" />
         <meta
             property="og:description"
-            content="Terminal-native agent runtime and multiplexer. Detach, reattach, SSH in, and keep every agent visible."
+            content="To coding agents what tmux is to terminals. Runs where your agents run — close the laptop, ssh from anywhere, nothing dies."
         />
         <meta property="og:url" content="https://herdr.dev/" />
         <meta
             property="og:image"
-            content="https://herdr.dev/assets/og-card-v6.png"
+            content="https://herdr.dev/assets/og-card-v8.png"
         />
         <meta property="og:image:width" content="1200" />
         <meta property="og:image:height" content="630" />
@@ -31,11 +31,11 @@
         <meta name="twitter:title" content="Herdr — one terminal for the whole herd" />
         <meta
             name="twitter:description"
-            content="Terminal-native agent runtime and multiplexer. Detach, reattach, SSH in, and keep every agent visible."
+            content="To coding agents what tmux is to terminals. Runs where your agents run — close the laptop, ssh from anywhere, nothing dies."
         />
         <meta
             name="twitter:image"
-            content="https://herdr.dev/assets/og-card-v6.png"
+            content="https://herdr.dev/assets/og-card-v8.png"
         />
         <meta name="twitter:image:alt" content="Herdr — One terminal. The whole herd." />
 
@@ -57,7 +57,7 @@
                 document.documentElement.setAttribute("data-palette", saved || system);
             })();
         </script>
-        <link rel="stylesheet" href="/css/style.css?v=21" />
+        <link rel="stylesheet" href="/css/style.css?v=33" />
     </head>
     <body>
         <header class="site-header">
@@ -115,17 +115,17 @@
                     <div class="hero-copy">
                     <p class="eyebrow">
                         <span class="status-dot dot-done"></span>
-                        Terminal-native agent runtime
+                        Agent multiplexer · lives in your terminal
                     </p>
                     <h1>One terminal. The whole herd.</h1>
                     <p class="hero-lede">
-                        Herdr is an agent runtime that runs inside your terminal.
-                        Keep your shell, SSH setup, fonts, and keybinds; add
-                        tmux-style persistence, mouse-native panes,
+                        Herdr is to coding agents what tmux is to terminals:
+                        a multiplexer that runs where your agents run — your
+                        machine, your server, anywhere you can ssh. See
                         <span class="state blocked">blocked</span>,
                         <span class="state working">working</span>, and
-                        <span class="state done">done</span> agent state, and an
-                        API agents can drive.
+                        <span class="state done">done</span> at a glance,
+                        click anything, close the laptop. Nothing dies.
                     </p>
                     <div class="hero-actions">
                         <a class="button button-primary" href="/docs/quick-start/"
@@ -189,69 +189,187 @@
                 <figure class="hero-product-shot">
                     <div
                         class="herdr-ui-mock"
+                        id="herd-mock"
                         role="img"
-                        aria-label="Stylized Herdr session with spaces, tabs, agent states, terminal panes, and a local docs server"
+                        aria-label="Interactive Herdr session mock with workspaces, tabs, agent states, and terminal panes running Claude Code and Codex"
                     >
                         <aside class="mock-sidebar">
                             <div class="mock-sidebar-title">spaces</div>
-                            <div class="mock-space active">
-                                <span class="mock-dot dot-idle"></span>
+                            <div class="mock-space active" data-ws="herdr">
+                                <span class="mock-dot dot-working"></span>
                                 <div><strong>herdr</strong><small>master</small></div>
                             </div>
-                            <div class="mock-space">
+                            <div class="mock-space" data-ws="llm-proxy">
                                 <span class="mock-dot dot-blocked"></span>
                                 <div><strong>llm-proxy</strong><small>master</small></div>
                             </div>
-                            <div class="mock-space">
+                            <div class="mock-space" data-ws="qmp">
                                 <span class="mock-dot dot-done"></span>
                                 <div><strong>qmp</strong><small>autoresearch/qmp-ra…</small></div>
                             </div>
                             <div class="mock-sidebar-spacer"></div>
-                            <div class="mock-sidebar-row"><span>new</span><span>menu</span></div>
                             <div class="mock-agent-title"><span>agents</span><span>all</span></div>
-                            <div class="mock-agent"><span>✓</span><div><strong>doc</strong><small>idle · pi</small></div></div>
-                            <div class="mock-agent working"><span class="braille-spinner"></span><div><strong>custom-row</strong><small>working · pi</small></div></div>
-                            <div class="mock-agent blocked"><span>◉</span><div><strong>llm-proxy</strong><small>blocked · claude</small></div></div>
-                            <div class="mock-agent done"><span>●</span><div><strong>qmp</strong><small>done · codex</small></div></div>
+                            <div class="mock-agent working" data-agent="herdr" data-kind="claude" data-ws-link="herdr" data-tab-link="main"><span class="braille-spinner"></span><div><strong>herdr</strong><small>working · claude</small></div></div>
+                            <div class="mock-agent" data-agent="explore" data-kind="opencode" data-ws-link="herdr" data-tab-link="opencode"><span>✓</span><div><strong>explore</strong><small>idle · opencode</small></div></div>
+                            <div class="mock-agent blocked" data-agent="llm-proxy" data-kind="claude" data-ws-link="llm-proxy" data-tab-link="main"><span>◉</span><div><strong>llm-proxy</strong><small>blocked · claude</small></div></div>
+                            <div class="mock-agent done" data-agent="qmp" data-kind="codex" data-ws-link="qmp" data-tab-link="main"><span>●</span><div><strong>qmp</strong><small>done · codex</small></div></div>
                         </aside>
                         <section class="mock-main">
-                            <div class="mock-tabs">
-                                <span>doc</span><span>custom-row</span><span class="active">herdr</span><span>+</span>
-                            </div>
-                            <div class="mock-panes">
-                                <div class="mock-pane focused">
-                                    <div class="mock-prompt"><span>~/Projects/herdr</span> <em>master</em></div>
-                                    <div><b>❯</b> <span class="cmd">printf</span> <span class="str">"one terminal. the whole herd.\n"</span> | <span class="cmd">cowsay</span></div>
-                                    <pre>-------------------------------
-&lt; one terminal. the whole herd. &gt;
--------------------------------
-        \   ^__^
-         \  (oo)\_______
-            (__)\       )\/\
-                ||----w |
-                ||     ||</pre>
-                                    <div class="mock-prompt"><span>~/Projects/herdr</span> <em>master</em></div>
-                                    <div><b>❯</b> <span class="cursor"></span></div>
+                            <div class="mock-view active" data-view="herdr">
+                                <div class="mock-tabs">
+                                    <span data-tab="opencode">opencode</span><span class="active" data-tab="main">herdr</span><span>+</span>
                                 </div>
-                                <div class="mock-pane">
-                                    <div class="mock-prompt"><span>~/Projects/herdr-worktrees/docs-site/website</span> <em>docs-site*</em></div>
-                                    <div><b>❯</b> <span class="cmd">bun</span> run dev</div>
-                                    <div class="dim">$ node scripts/prepare-docs.mjs && astro dev</div>
-                                    <div><span class="time">02:10:44</span> <span class="blue">[types]</span> Generated 0ms</div>
-                                    <div><span class="time">02:10:44</span> <span class="blue">[content]</span> Synced content</div>
-                                    <br />
-                                    <div><span class="badge">astro</span> <span class="green">v5.18.1</span> ready in 668 ms</div>
-                                    <br />
-                                    <div class="url-line">┃ Local&nbsp;&nbsp; <span>http://localhost:4321/</span></div>
-                                    <div class="dim">  Network&nbsp; use --host to expose</div>
-                                    <br />
-                                    <div><span class="time">02:10:44</span> <span class="green">watching for file changes...</span></div>
+                                <div class="mock-panes active" data-tab="main">
+                                    <div class="mock-pane focused tui">
+                                        <div class="cc-head"><span class="cc-mark">✻</span> <b>Claude Code</b> <span class="dim">v2.1.168</span></div>
+                                        <div class="dim">&nbsp;&nbsp;~/Projects/herdr · master</div>
+                                        <br />
+                                        <div><b>❯</b> the sidebar flickers when an agent flips state fast</div>
+                                        <br />
+                                        <div><span class="cc-bullet">●</span> Found it. The rollup recomputes on every PTY chunk, so a double state flip repaints the dot mid-frame.</div>
+                                        <br />
+                                        <div><span class="cc-bullet">●</span> Plan:</div>
+                                        <div class="dim">&nbsp;&nbsp;· src/app/state.rs — buffer state events per tick</div>
+                                        <div class="dim">&nbsp;&nbsp;· src/ui/sidebar.rs — repaint rollups once per frame</div>
+                                        <br />
+                                        <div><b>❯</b> go, and add a regression test</div>
+                                        <br />
+                                        <div><span class="cc-working"><span class="braille-spinner">⠋</span> Working…</span> <span class="dim">(<span id="cc-timer">13m 36s</span> · esc to interrupt)</span></div>
+                                        <div class="tui-bottom">
+                                            <div class="cc-rule"></div>
+                                            <div><b>❯</b> <span class="cursor"></span></div>
+                                            <div class="cc-rule"></div>
+                                            <div class="dim">~/Projects/herdr &gt; master &gt; ctx ─── 3% 34k/1M</div>
+                                            <div class="dim">&gt;&gt; bypass permissions on (shift+tab to cycle)</div>
+                                        </div>
+                                    </div>
+                                    <div class="mock-pane">
+                                        <div class="mock-prompt"><span>~/Projects/herdr</span> <em>master</em></div>
+                                        <div><b>❯</b> <span class="cmd">bun</span> run dev</div>
+                                        <div class="dim">$ node scripts/prepare-docs.mjs && astro dev</div>
+                                        <div><span class="time">02:10:44</span> <span class="blue">[types]</span> Generated 0ms</div>
+                                        <div><span class="time">02:10:44</span> <span class="blue">[content]</span> Synced content</div>
+                                        <br />
+                                        <div><span class="badge">astro</span> <span class="green">v5.18.1</span> ready in 668 ms</div>
+                                        <br />
+                                        <div class="url-line">┃ Local&nbsp;&nbsp; <span>http://localhost:4321/</span></div>
+                                        <div class="dim">  Network&nbsp; use --host to expose</div>
+                                        <br />
+                                        <div><span class="time">02:10:44</span> <span class="green">watching for file changes...</span></div>
+                                    </div>
+                                </div>
+                                <div class="mock-panes single" data-tab="opencode">
+                                    <div class="mock-pane focused tui">
+                                        <div class="oc-y">+ Thought: 468ms</div>
+                                        <br />
+                                        <div><span class="dim">→</span> Read src/main.rs</div>
+                                        <br />
+                                        <div class="oc-y">+ Thought: 292ms</div>
+                                        <br />
+                                        <div>This is <span class="oc-y">src/main.rs</span> — the entry point for <b>herdr</b>. Here's what it does:</div>
+                                        <br />
+                                        <div><span class="blue">1.</span> Arg parsing — <span class="oc-y">session::configure_from_args</span>, then remote args for the SSH bridge.</div>
+                                        <div><span class="blue">2.</span> Subcommand dispatch — <span class="oc-y">server</span>, <span class="oc-y">client</span>, <span class="oc-y">update</span> — each returns early.</div>
+                                        <div><span class="blue">3.</span> Session mode — <span class="oc-y">auto_detect_launch()</span> connects to a running server or spawns one.</div>
+                                        <br />
+                                        <div class="dim"><span class="oc-badge"></span>&nbsp; Build · MiMo V2.5 Free · 16.6s</div>
+                                        <div class="tui-bottom">
+                                            <div class="oc-input">
+                                                <div><span class="cursor"></span></div>
+                                                <div class="dim"><span class="oc-purple">Build</span> · MiMo V2.5 Free OpenCode Zen</div>
+                                            </div>
+                                            <div class="oc-status"><span class="dim">25.2K (13%)&nbsp;&nbsp;ctrl+p commands</span></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="mock-view" data-view="llm-proxy">
+                                <div class="mock-tabs">
+                                    <span class="active" data-tab="main">migrate</span><span data-tab="logs">logs</span><span>+</span>
+                                </div>
+                                <div class="mock-panes single active" data-tab="main">
+                                    <div class="mock-pane focused tui">
+                                        <div class="cc-head"><span class="cc-mark">✻</span> <b>Claude Code</b> <span class="dim">v2.1.168</span></div>
+                                        <div class="dim">&nbsp;&nbsp;~/Projects/llm-proxy · master</div>
+                                        <br />
+                                        <div><b>❯</b> prep the request-log migration and run it</div>
+                                        <br />
+                                        <div><span class="cc-bullet">●</span> Wrote migrations/0007_request_log.sql — request_log table, retention index on created_at, daily rollup view.</div>
+                                        <br />
+                                        <div><span class="cc-bullet">●</span> Local checks pass: sqlx prepare is clean, backfill dry-run touches 41,209 rows. Ready to apply.</div>
+                                        <div class="tui-bottom">
+                                            <div class="cc-permission">
+                                                <div><b>Bash command</b></div>
+                                                <div><span class="cmd">cargo</span> sqlx migrate run</div>
+                                                <div class="dim">Apply pending database migrations</div>
+                                                <br />
+                                                <div>Do you want to proceed?</div>
+                                                <div class="sel">❯ 1. Yes</div>
+                                                <div class="dim">&nbsp;&nbsp;2. No, and tell Claude what to do differently (esc)</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="mock-panes single" data-tab="logs">
+                                    <div class="mock-pane focused">
+                                        <div class="mock-prompt"><span>~/Projects/llm-proxy</span> <em>master</em></div>
+                                        <div><b>❯</b> <span class="cmd">tail</span> -f logs/proxy.log</div>
+                                        <div><span class="time">02:30:58</span> <span class="blue">INFO</span> request id=4818 route=/v1/messages 200 312ms</div>
+                                        <div><span class="time">02:31:04</span> <span class="blue">INFO</span> request id=4819 route=/v1/messages 200 287ms</div>
+                                        <div><span class="time">02:31:09</span> <span class="dim">DEBUG</span> cache hit ratio 0.93</div>
+                                        <div><span class="time">02:31:12</span> <span class="blue">INFO</span> request id=4820 route=/v1/messages 200 301ms</div>
+                                        <div><span class="time">02:31:15</span> <span class="red">WARN</span> upstream latency p99 1.8s</div>
+                                        <div><span class="time">02:31:18</span> <span class="blue">INFO</span> request id=4821 route=/v1/messages 200 295ms</div>
+                                        <div><span class="time">02:31:21</span> <span class="red">WARN</span> 429 from upstream, retrying in 2s</div>
+                                        <div><span class="time">02:31:24</span> <span class="blue">INFO</span> request id=4822 route=/v1/messages 200 1102ms</div>
+                                        <div><span class="time">02:31:30</span> <span class="dim">DEBUG</span> cache hit ratio 0.94</div>
+                                        <div><span class="time">02:31:33</span> <span class="blue">INFO</span> request id=4823 route=/v1/embeddings 200 88ms</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="mock-view" data-view="qmp">
+                                <div class="mock-tabs">
+                                    <span class="active" data-tab="main">codex</span><span data-tab="server">server</span><span>+</span>
+                                </div>
+                                <div class="mock-panes single active" data-tab="main">
+                                    <div class="mock-pane focused tui">
+                                        <div><span class="cx-bullet">•</span> <b>Explored</b></div>
+                                        <div class="dim">&nbsp;&nbsp;└ Read live_handoff.rs</div>
+                                        <br />
+                                        <div><span class="cx-bullet">•</span> <b>Ran</b></div>
+                                        <div class="dim">&nbsp;&nbsp;└ cargo nextest run -E 'test(live_handoff)'</div>
+                                        <div class="dim">&nbsp;&nbsp;└ 14 passed · 0 failed · 41.3s</div>
+                                        <br />
+                                        <div><span class="cx-bullet">•</span> The handoff suite passes. Pane PTYs survive server replacement, and long-lived workloads — including the http.server in the next tab — keep responding afterward.</div>
+                                        <br />
+                                        <div><span class="cx-bullet">•</span> Next I can wire the soak test into nightly CI and fail on p95 regressions. Want that?</div>
+                                        <div class="tui-bottom">
+                                            <div class="cc-rule"></div>
+                                            <div><b>›</b> <span class="cursor"></span></div>
+                                            <br />
+                                            <div class="dim">gpt-5.5 medium · ~/qmp · master · Context 6% used</div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="mock-panes single" data-tab="server">
+                                    <div class="mock-pane focused">
+                                        <div class="mock-prompt"><span>~/qmp</span> <em>master</em></div>
+                                        <div><b>❯</b> <span class="cmd">python3</span> -m http.server 8080</div>
+                                        <div class="dim">Serving HTTP on 0.0.0.0 port 8080 ...</div>
+                                        <div><span class="time">02:28:41</span> "GET /runs/latest.json" <span class="green">200</span></div>
+                                        <div><span class="time">02:29:03</span> "GET /runs/latest.json" <span class="green">200</span></div>
+                                        <div><span class="time">02:29:25</span> "GET /qmp/report.html" <span class="green">200</span></div>
+                                        <div><span class="time">02:30:07</span> "GET /runs/latest.json" <span class="green">200</span></div>
+                                        <div><span class="time">02:30:18</span> "GET /favicon.ico" <span class="red">404</span></div>
+                                        <div><span class="time">02:30:42</span> "GET /qmp/report.html" <span class="green">200</span></div>
+                                        <div><span class="time">02:31:09</span> "GET /runs/latest.json" <span class="green">200</span></div>
+                                    </div>
                                 </div>
                             </div>
                         </section>
                     </div>
                     <figcaption>
-                        The whole herd in one terminal.
+                        The whole herd in one terminal. Click the sidebar — it's a real layout.
                     </figcaption>
                 </figure>
                 </div>
@@ -259,7 +377,7 @@
 
             <section class="logo-cloud" aria-labelledby="logo-cloud-title">
                 <div class="logo-cloud-heading">
-                    <p class="section-kicker">Used in the wild</p>
+                    <p class="section-kicker"># used in the wild</p>
                     <h2 id="logo-cloud-title">Popular with engineers from</h2>
                 </div>
                 <div class="logo-marquee" aria-label="Company logos">
@@ -304,8 +422,88 @@
                 </div>
             </section>
 
+            <section class="section access-section">
+                <div class="section-heading-wide">
+                    <div>
+                        <p class="section-kicker"># not an app</p>
+                        <h2>Runs where your agents run.</h2>
+                    </div>
+                    <p>
+                        Desktop agent managers are stuck on the machine with the
+                        GUI. Herdr is a client–server multiplexer: agents live on
+                        whichever box does the work, and you attach from anywhere
+                        — your laptop, any SSH client, even a phone.
+                    </p>
+                </div>
+                <div class="access-grid">
+                    <article class="access-card">
+                        <span class="access-label">local</span>
+                        <h3>Your machine</h3>
+                        <p>
+                            Start a local session, split panes, create tabs, and
+                            keep agents running while your terminal comes and
+                            goes.
+                        </p>
+                        <pre><code>$ herdr</code></pre>
+                    </article>
+                    <article class="access-card">
+                        <span class="access-label">ssh</span>
+                        <h3>Any SSH client</h3>
+                        <p>
+                            Use Herdr like tmux on a remote box. The session
+                            stays on the server after you detach.
+                        </p>
+                        <pre><code>$ ssh you@server
+$ herdr</code></pre>
+                    </article>
+                    <article class="access-card">
+                        <span class="access-label">thin client</span>
+                        <h3>Remote attach</h3>
+                        <p>
+                            Point your local Herdr client at an SSH config host
+                            and stream the remote TUI back to your terminal.
+                        </p>
+                        <pre><code>$ herdr --remote workbox</code></pre>
+                    </article>
+                </div>
+                <div class="mobile-proof">
+                    <div class="mobile-copy">
+                        <p class="section-kicker"># responsive tui</p>
+                        <h3>Mobile-first when the terminal gets small.</h3>
+                        <p>
+                            Herdr stays usable over SSH from a phone or tablet.
+                            The terminal view remains real, while narrow screens
+                            get a switcher built for touch-sized decisions.
+                        </p>
+                    </div>
+                    <div class="mobile-shots">
+                        <figure>
+                            <img
+                                src="/assets/mobile-agent-session-v2.jpeg"
+                                alt="Herdr agent session over SSH on a phone"
+                                loading="lazy"
+                            />
+                            <figcaption>agent session over SSH</figcaption>
+                        </figure>
+                        <figure>
+                            <img
+                                src="/assets/mobile-switch-menu-v2.jpeg"
+                                alt="Herdr responsive switch menu on a phone"
+                                loading="lazy"
+                            />
+                            <figcaption>responsive switch menu</figcaption>
+                        </figure>
+                        <p class="mobile-shout">
+                            screenshots taken with
+                            <a href="https://getmoshi.app/" target="_blank" rel="noopener">moshi</a>
+                            ❤️ on iPhone
+                        </p>
+                    </div>
+                </div>
+            </section>
+
             <section class="section intro-section">
-                <p class="section-kicker">The missing layer</p>
+                <p class="section-kicker"># the missing layer</p>
                 <div class="section-heading-wide">
                     <h2>
                         Keep your terminal. Add the control surface.
@@ -314,22 +512,22 @@
                         Desktop agent terminals give you app UI. tmux gives you
                         persistence. Herdr sits between them: a lightweight TUI
                         process with real terminal panes, clickable layout,
-                        agent state, detach/reattach, remote attach, and a
-                        runtime API.
+                        agent state, detach/reattach, remote attach, and an API
+                        your agents can drive.
                     </p>
                 </div>
                 <div class="contrast-grid" aria-label="What Herdr is not">
                     <article>
                         <span>not a terminal emulator</span>
-                        <p>Use Ghostty, Kitty, iTerm, Alacritty, or any terminal you already trust.</p>
+                        <p>Ghostty, Kitty, iTerm, Alacritty — your terminal stays.</p>
                     </article>
                     <article>
                         <span>not a browser dashboard</span>
-                        <p>No web view, hosted control plane, account, or reconstructed chat surface.</p>
+                        <p>No web view, no account, no hosted control plane.</p>
                     </article>
                     <article>
                         <span>more than tmux for agents</span>
-                        <p>Persistence plus mouse-native panes, state rollups, and commands agents can call.</p>
+                        <p>Persistence plus clickable panes, agent state, an API.</p>
                     </article>
                 </div>
             </section>
@@ -337,11 +535,11 @@
             <section class="section compare-section">
                 <div class="section-heading-wide">
                     <div>
-                        <p class="section-kicker">Positioning</p>
-                        <h2>tmux persistence, agent awareness, no terminal replacement.</h2>
+                        <p class="section-kicker"># positioning</p>
+                        <h2>Most agent managers are apps. Herdr is a multiplexer.</h2>
                     </div>
                     <p>
-                        tmux and Zellij own persistent terminal sessions. Desktop agent apps own dashboards, editors, or worktree flows. Herdr keeps the multiplexer inside your terminal and makes it agent-aware.
+                        tmux and Zellij own persistent terminal sessions but don't understand agents. Desktop agent apps understand agents but live on one machine. Herdr keeps the multiplexer in your terminal and makes it agent-aware.
                         <a href="/compare/">See the full comparison →</a>
                     </p>
                 </div>
@@ -450,13 +648,11 @@
 
             <section class="section feature-split">
                 <div class="feature-copy">
-                    <p class="section-kicker">Your terminal</p>
+                    <p class="section-kicker"># your terminal</p>
                     <h2>Same shell, same keybinds, real panes.</h2>
                     <p>
-                        Herdr does not replace your terminal or wrap agents in a
-                        reconstructed chat view. It runs real processes in PTYs,
-                        then adds layout, click targets, state, persistence, and
-                        automation around them.
+                        No rebuilt chat view. Real processes in real PTYs, with
+                        layout, clicks, state, and persistence added around them.
                     </p>
                     <ul class="check-list">
                         <li>Use the mouse for panes, tabs, workspaces, and menus.</li>
@@ -494,132 +690,14 @@
                 </figure>
             </section>
 
-            <section class="section pillars" aria-labelledby="pillars-title">
-                <div class="section-heading">
-                    <p class="section-kicker">Core pillars</p>
-                    <h2 id="pillars-title">Why terminal users switch.</h2>
-                </div>
-                <div class="pillar-grid">
-                    <article class="pillar-card">
-                        <span class="card-index">01</span>
-                        <h3>Survives disconnects</h3>
-                        <p>
-                            Panes keep running in a background session server.
-                            Close the terminal, lose SSH, or detach on purpose;
-                            come back to the same herd later.
-                        </p>
-                    </article>
-                    <article class="pillar-card">
-                        <span class="card-index">02</span>
-                        <h3>Runs where code lives</h3>
-                        <p>
-                            Use Herdr locally, inside any SSH session, or as a
-                            thin client to a remote host. Keep credentials and
-                            repos on the machine doing the work.
-                        </p>
-                    </article>
-                    <article class="pillar-card">
-                        <span class="card-index">03</span>
-                        <h3>Mouse-native TUI</h3>
-                        <p>
-                            Click panes, tabs, workspaces, and agents. Drag
-                            borders, select text, use right-click menus, then
-                            stay on the keyboard whenever that is faster.
-                        </p>
-                    </article>
-                    <article class="pillar-card">
-                        <span class="card-index">04</span>
-                        <h3>Agents can drive it</h3>
-                        <p>
-                            The CLI and socket API let agents create panes, run
-                            commands, read output, wait for changes, and operate
-                            their workspace without hand-shuffled terminals.
-                        </p>
-                    </article>
-                </div>
-            </section>
-
-            <section class="section access-section">
-                <div class="section-heading">
-                    <p class="section-kicker">Local or remote</p>
-                    <h2>Run Herdr where the work lives.</h2>
-                </div>
-                <div class="access-grid">
-                    <article class="access-card">
-                        <span class="access-label">local</span>
-                        <h3>Your machine</h3>
-                        <p>
-                            Start a local session, split panes, create tabs, and
-                            keep agents running while your terminal comes and
-                            goes.
-                        </p>
-                        <pre><code>$ herdr</code></pre>
-                    </article>
-                    <article class="access-card">
-                        <span class="access-label">ssh</span>
-                        <h3>Any SSH client</h3>
-                        <p>
-                            Use Herdr like tmux on a remote box. The session
-                            stays on the server after you detach.
-                        </p>
-                        <pre><code>$ ssh you@server
-$ herdr</code></pre>
-                    </article>
-                    <article class="access-card">
-                        <span class="access-label">thin client</span>
-                        <h3>Remote attach</h3>
-                        <p>
-                            Point your local Herdr client at an SSH config host
-                            and stream the remote TUI back to your terminal.
-                        </p>
-                        <pre><code>$ herdr --remote workbox</code></pre>
-                    </article>
-                </div>
-                <div class="mobile-proof">
-                    <div class="mobile-copy">
-                        <p class="section-kicker">Responsive TUI</p>
-                        <h3>Mobile-first when the terminal gets small.</h3>
-                        <p>
-                            Herdr stays usable over SSH from a phone or tablet.
-                            The terminal view remains real, while narrow screens
-                            get a switcher built for touch-sized decisions.
-                        </p>
-                    </div>
-                    <div class="mobile-shots">
-                        <figure>
-                            <img
-                                src="/assets/mobile-agent-session-v2.jpeg"
-                                alt="Herdr agent session over SSH on a phone"
-                                loading="lazy"
-                            />
-                            <figcaption>agent session over SSH</figcaption>
-                        </figure>
-                        <figure>
-                            <img
-                                src="/assets/mobile-switch-menu-v2.jpeg"
-                                alt="Herdr responsive switch menu on a phone"
-                                loading="lazy"
-                            />
-                            <figcaption>responsive switch menu</figcaption>
-                        </figure>
-                        <p class="mobile-shout">
-                            screenshots taken with
-                            <a href="https://getmoshi.app/" target="_blank" rel="noopener">moshi</a>
-                            ❤️ on iPhone
-                        </p>
-                    </div>
-                </div>
-            </section>
-
             <section class="section api-section">
                 <div class="api-copy">
-                    <p class="section-kicker">Runtime surface</p>
+                    <p class="section-kicker"># agents can drive it</p>
                     <h2>The UI is also a control surface.</h2>
                     <p>
-                        Herdr exposes workspace, tab, pane, output, and wait
-                        operations through a CLI and newline-delimited JSON
-                        socket API. Agents can operate their own workspace
-                        instead of asking you to shuffle terminals by hand.
+                        A CLI and JSON socket API expose workspaces, panes,
+                        output, and waits. Your agents can run their own
+                        workspace.
                     </p>
                     <div class="inline-links">
                         <a href="/docs/cli-reference/">CLI reference →</a>
@@ -644,7 +722,7 @@ $ herdr</code></pre>
 
             <section class="section awareness-section">
                 <div class="section-heading">
-                    <p class="section-kicker">Agent awareness</p>
+                    <p class="section-kicker"># agent awareness</p>
                     <h2>Keep the herd in sight.</h2>
                 </div>
                 <div class="awareness-grid">
@@ -681,8 +759,8 @@ $ herdr</code></pre>
                             <figure class="awareness-mock" role="img" aria-label="Herdr agent list showing states">
                                 <div class="mock-sidebar">
                                     <div class="mock-agent-title"><span>agents</span><span>all</span></div>
-                                    <div class="mock-agent"><span>✓</span><div><strong>doc</strong><small>idle · pi</small></div></div>
-                                    <div class="mock-agent working"><span class="braille-spinner"></span><div><strong>custom-row</strong><small>working · pi</small></div></div>
+                                    <div class="mock-agent"><span>✓</span><div><strong>explore</strong><small>idle · opencode</small></div></div>
+                                    <div class="mock-agent working"><span class="braille-spinner"></span><div><strong>herdr</strong><small>working · claude</small></div></div>
                                     <div class="mock-agent blocked"><span>◉</span><div><strong>llm-proxy</strong><small>blocked · claude</small></div></div>
                                     <div class="mock-agent done"><span>●</span><div><strong>qmp</strong><small>done · codex</small></div></div>
                                     <div class="mock-sidebar-spacer"></div>
@@ -706,7 +784,7 @@ $ herdr</code></pre>
 
             <section class="section integrations-section">
                 <div class="section-heading">
-                    <p class="section-kicker">Integrations</p>
+                    <p class="section-kicker"># integrations</p>
                     <h2>Bring your existing agents into the herd.</h2>
                 </div>
                 <div class="agent-grid" aria-label="Supported agents">
@@ -726,15 +804,14 @@ $ herdr</code></pre>
                     <div class="agent-card"><span class="agent-icon" style="--agent-icon: url('/assets/agent-icons/qoder-mask.svg')"></span><span>Qoder CLI</span></div>
                 </div>
                 <p class="integration-note">
-                    Any terminal agent works in Herdr. Use the Herdr API to add
-                    richer state, orchestration, and custom workflows;
-                    <a href="/docs/integrations/">see example integrations</a>
-                    or build your own for anything.
+                    Any terminal agent works out of the box.
+                    <a href="/docs/integrations/">Integrations</a> add richer
+                    state and session resume.
                 </p>
             </section>
 
             <section class="final-cta">
-                <p class="section-kicker">Start the herd</p>
+                <p class="section-kicker"># start the herd</p>
                 <h2>Install Herdr, run two agents, detach once.</h2>
                 <p>
                     The value shows up the first time the herd keeps running
@@ -1083,18 +1160,83 @@ $ herdr</code></pre>
 
             (function () {
                 var frames = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
-                var els = document.querySelectorAll(".braille-spinner");
-                if (!els.length) return;
-                var states = Array.prototype.map.call(els, function () { return 0; });
-                els.forEach(function (el, idx) {
-                    el.textContent = frames[0];
-                });
+                var tick = 0;
                 setInterval(function () {
-                    els.forEach(function (el, idx) {
-                        states[idx] = (states[idx] + 1) % frames.length;
-                        el.textContent = frames[states[idx]];
-                    });
+                    tick = (tick + 1) % frames.length;
+                    var els = document.querySelectorAll(".braille-spinner");
+                    for (var i = 0; i < els.length; i++) {
+                        els[i].textContent = frames[tick];
+                    }
                 }, 80);
+            })();
+
+            /* herd mock: clickable workspaces, tabs, and agents */
+            (function () {
+                var mock = document.getElementById("herd-mock");
+                if (!mock) return;
+
+                function selectTab(tab) {
+                    var target = tab.getAttribute("data-tab");
+                    if (!target) return;
+                    tab.parentElement.querySelectorAll("span").forEach(function (t) {
+                        t.classList.remove("active");
+                    });
+                    tab.classList.add("active");
+                    var view = tab.closest(".mock-view");
+                    view.querySelectorAll(".mock-panes").forEach(function (panes) {
+                        panes.classList.toggle("active", panes.getAttribute("data-tab") === target);
+                    });
+                }
+
+                function activateWorkspace(id, tabId) {
+                    mock.querySelectorAll(".mock-space").forEach(function (ws) {
+                        ws.classList.toggle("active", ws.getAttribute("data-ws") === id);
+                    });
+                    mock.querySelectorAll(".mock-view").forEach(function (view) {
+                        view.classList.toggle("active", view.getAttribute("data-view") === id);
+                    });
+                    if (tabId) {
+                        var view = mock.querySelector('.mock-view[data-view="' + id + '"]');
+                        var tab = view && view.querySelector('.mock-tabs span[data-tab="' + tabId + '"]');
+                        if (tab) selectTab(tab);
+                    }
+                }
+
+                mock.querySelectorAll(".mock-space").forEach(function (ws) {
+                    ws.addEventListener("click", function () {
+                        activateWorkspace(ws.getAttribute("data-ws"));
+                    });
+                });
+
+                mock.querySelectorAll(".mock-agent").forEach(function (a) {
+                    a.addEventListener("click", function () {
+                        activateWorkspace(
+                            a.getAttribute("data-ws-link"),
+                            a.getAttribute("data-tab-link")
+                        );
+                    });
+                });
+
+                mock.querySelectorAll(".mock-tabs span").forEach(function (tab) {
+                    if (!tab.getAttribute("data-tab")) return;
+                    tab.addEventListener("click", function (event) {
+                        event.stopPropagation();
+                        selectTab(tab);
+                    });
+                });
+
+                /* the working counter keeps counting, like the real thing */
+                var timer = document.getElementById("cc-timer");
+                if (timer) {
+                    var seconds = 13 * 60 + 36;
+                    setInterval(function () {
+                        if (document.hidden) return;
+                        seconds += 1;
+                        if (seconds >= 16 * 60) seconds = 0; /* new turn, counter resets */
+                        timer.textContent = Math.floor(seconds / 60) + "m " + (seconds % 60) + "s";
+                    }, 1000);
+                }
+
             })();
         </script>
     </body>

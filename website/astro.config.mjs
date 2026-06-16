@@ -70,7 +70,7 @@ export default defineConfig({
       head: [
         {
           tag: 'meta',
-          attrs: { property: 'og:image', content: 'https://herdr.dev/assets/og-card-v6.png' },
+          attrs: { property: 'og:image', content: 'https://herdr.dev/assets/og-card-v8.png' },
         },
         { tag: 'meta', attrs: { property: 'og:image:width', content: '1200' } },
         { tag: 'meta', attrs: { property: 'og:image:height', content: '630' } },
@@ -83,7 +83,7 @@ export default defineConfig({
         },
         {
           tag: 'meta',
-          attrs: { name: 'twitter:image', content: 'https://herdr.dev/assets/og-card-v6.png' },
+          attrs: { name: 'twitter:image', content: 'https://herdr.dev/assets/og-card-v8.png' },
         },
         {
           tag: 'meta',
@@ -105,18 +105,25 @@ export default defineConfig({
             { label: 'Overview', slug: 'docs' },
             { label: 'Install', slug: 'docs/install' },
             { label: 'Quick start', slug: 'docs/quick-start' },
-            { label: 'How to work with Herdr', slug: 'docs/how-to-work' },
             { label: 'Concepts', slug: 'docs/concepts' },
+            { label: 'Keyboard', slug: 'docs/keyboard' },
+            { label: 'How to work with Herdr', slug: 'docs/how-to-work' },
           ],
         },
         {
           label: 'Core guides',
           items: [
             { label: 'Agents', slug: 'docs/agents' },
-            { label: 'Integrations', slug: 'docs/integrations' },
-            { label: 'Configuration', slug: 'docs/configuration' },
-            { label: 'Persistence and remote access', slug: 'docs/persistence-remote' },
             { label: 'Session state and restore', slug: 'docs/session-state' },
+            { label: 'Persistence and remote access', slug: 'docs/persistence-remote' },
+            { label: 'Configuration', slug: 'docs/configuration' },
+          ],
+        },
+        {
+          label: 'Plugins',
+          items: [
+            { label: 'Plugins', slug: 'docs/plugins' },
+            { label: 'Marketplace', slug: 'docs/marketplace' },
           ],
         },
         {
@@ -124,15 +131,15 @@ export default defineConfig({
           items: [
             { label: 'CLI reference', slug: 'docs/cli-reference' },
             { label: 'Socket API', slug: 'docs/socket-api' },
+            { label: 'Integrations', slug: 'docs/integrations' },
             { label: 'Agent skill file', slug: 'docs/agent-skill' },
+            { label: 'Windows beta', slug: 'docs/windows-beta' },
           ],
         },
         {
           label: 'Updates',
           items: [
-            { label: 'Releases', link: '/releases/' },
             { label: 'Preview docs', slug: 'docs/preview' },
-            { label: 'Blog', link: '/blog/' },
           ],
         },
       ],

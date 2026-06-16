@@ -4,10 +4,20 @@ interface Props {
   description: string;
   canonicalPath: string;
   ogType?: 'website' | 'article';
+  ogImage?: string;
+  ogImageAlt?: string;
 }
 
-const { title, description, canonicalPath, ogType = 'website' } = Astro.props;
+const {
+  title,
+  description,
+  canonicalPath,
+  ogType = 'website',
+  ogImage = '/assets/og-card-v8.png',
+  ogImageAlt = 'Herdr — One terminal. The whole herd.',
+} = Astro.props;
 const canonicalUrl = new URL(canonicalPath, 'https://herdr.dev').toString();
+const ogImageUrl = new URL(ogImage, 'https://herdr.dev').toString();
 ---
 
 <!doctype html>
@@ -25,16 +35,16 @@ const canonicalUrl = new URL(canonicalPath, 'https://herdr.dev').toString();
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
     <meta property="og:url" content={canonicalUrl} />
-    <meta property="og:image" content="https://herdr.dev/assets/og-card-v6.png" />
+    <meta property="og:image" content={ogImageUrl} />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
-    <meta property="og:image:alt" content="Herdr — One terminal. The whole herd." />
+    <meta property="og:image:alt" content={ogImageAlt} />
 
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content={title} />
     <meta name="twitter:description" content={description} />
-    <meta name="twitter:image" content="https://herdr.dev/assets/og-card-v6.png" />
-    <meta name="twitter:image:alt" content="Herdr — One terminal. The whole herd." />
+    <meta name="twitter:image" content={ogImageUrl} />
+    <meta name="twitter:image:alt" content={ogImageAlt} />
 
     <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon.png?v=14" />
     <link rel="apple-touch-icon" href="/assets/logo.png" />
