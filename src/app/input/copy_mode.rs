@@ -759,6 +759,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn copy_mode_arrow_key_repeat_moves_cursor() {
+        let (mut app, _) = app_with_copy_screen(b"alpha\r\nbeta\r\ngamma\r\ndelta\r\n");
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        if let Some(copy_mode) = app.state.copy_mode.as_mut() {
+            copy_mode.cursor_row = 0;
+            copy_mode.cursor_col = 0;
+        }
+
+        let press = crate::raw_input::RawInputEvent::Key(
+            TerminalKey::new(KeyCode::Down, KeyModifiers::empty())
+                .with_kind(crossterm::event::KeyEventKind::Press),
+        );
+        let repeat = crate::raw_input::RawInputEvent::Key(
+            TerminalKey::new(KeyCode::Down, KeyModifiers::empty())
+                .with_kind(crossterm::event::KeyEventKind::Repeat),
+        );
+
+        app.handle_raw_input_event(press).await;
+        assert_eq!(app.state.copy_mode.expect("copy mode").cursor_row, 1);
+
+        // The held Down repeat must reach copy mode and advance the cursor again,
+        // even though copy mode is a non-terminal mode where repeats are dropped.
+        let repeat_handled = app.handle_raw_input_event(repeat).await;
+        assert!(repeat_handled);
+        assert_eq!(app.state.mode, Mode::Copy);
+        assert_eq!(app.state.copy_mode.expect("copy mode").cursor_row, 2);
+    }
+
+    #[tokio::test]
+    async fn copy_mode_non_arrow_key_repeat_is_ignored() {
+        let (mut app, _) = app_with_copy_screen(b"alpha\r\nbeta\r\ngamma\r\n");
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+        if let Some(copy_mode) = app.state.copy_mode.as_mut() {
+            copy_mode.cursor_row = 0;
+            copy_mode.cursor_col = 0;
+        }
+
+        let press = crate::raw_input::RawInputEvent::Key(
+            TerminalKey::new(KeyCode::Char('j'), KeyModifiers::empty())
+                .with_kind(crossterm::event::KeyEventKind::Press),
+        );
+        let repeat = crate::raw_input::RawInputEvent::Key(
+            TerminalKey::new(KeyCode::Char('j'), KeyModifiers::empty())
+                .with_kind(crossterm::event::KeyEventKind::Repeat),
+        );
+
+        app.handle_raw_input_event(press).await;
+        assert_eq!(app.state.copy_mode.expect("copy mode").cursor_row, 1);
+
+        // Only the arrow keys are exempted; vi-motion repeats stay suppressed.
+        let repeat_handled = app.handle_raw_input_event(repeat).await;
+        assert!(!repeat_handled);
+        assert_eq!(app.state.copy_mode.expect("copy mode").cursor_row, 1);
+    }
+
+    #[tokio::test]
     async fn copy_mode_ignores_prefix_key() {
         let (mut app, _) = app_with_copy_screen(b"foo bar\n");
         app.state.enter_copy_mode(&app.terminal_runtimes);

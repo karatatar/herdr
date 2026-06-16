@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use crossterm::terminal;
 
 use super::{
-    auto_updates_enabled, repeat_key_identity, App, Mode, ANIMATION_INTERVAL,
+    auto_updates_enabled, is_copy_mode_repeat_key, repeat_key_identity, App, Mode, ANIMATION_INTERVAL,
     AUTO_UPDATE_CHECK_INTERVAL, GIT_REMOTE_STATUS_REFRESH_INTERVAL, MIN_RENDER_INTERVAL,
     RESIZE_POLL_INTERVAL, SELECTION_AUTOSCROLL_INTERVAL,
 };
@@ -116,9 +116,14 @@ impl App {
                         true
                     }
                     crossterm::event::KeyEventKind::Repeat => {
-                        if self.state.mode == Mode::Terminal
-                            && !self.suppressed_repeat_keys.contains(&key_id)
-                        {
+                        let deliver = if self.state.mode == Mode::Terminal {
+                            !self.suppressed_repeat_keys.contains(&key_id)
+                        } else {
+                            // Copy mode exempts arrow keys so holding
+                            // Up/Down/Left/Right moves the cursor continuously.
+                            self.state.mode == Mode::Copy && is_copy_mode_repeat_key(&key)
+                        };
+                        if deliver {
                             self.handle_key(key).await;
                             true
                         } else {

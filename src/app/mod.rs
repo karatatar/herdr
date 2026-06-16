@@ -178,6 +178,21 @@ fn repeat_key_identity(
     (key.code, key.modifiers)
 }
 
+/// Whether a held-key repeat should be delivered to copy mode.
+///
+/// Copy mode is a non-terminal mode, so key repeats are normally dropped.
+/// The arrow keys are exempted so that holding Up/Down/Left/Right moves the
+/// copy-mode cursor continuously instead of one cell per physical press.
+fn is_copy_mode_repeat_key(key: &crate::input::TerminalKey) -> bool {
+    matches!(
+        key.code,
+        crossterm::event::KeyCode::Up
+            | crossterm::event::KeyCode::Down
+            | crossterm::event::KeyCode::Left
+            | crossterm::event::KeyCode::Right
+    )
+}
+
 fn auto_updates_enabled(no_session: bool) -> bool {
     !no_session && !cfg!(debug_assertions)
 }
@@ -1330,12 +1345,18 @@ impl App {
                             }
                         }
                         crossterm::event::KeyEventKind::Repeat => {
-                            if self.state.mode == Mode::Terminal
-                                && !self.suppressed_repeat_keys.contains(&key_id)
+                            if self.state.mode == Mode::Terminal {
+                                if !self.suppressed_repeat_keys.contains(&key_id) {
+                                    self.handle_terminal_key_headless(key);
+                                }
+                            } else if self.state.mode == Mode::Copy
+                                && is_copy_mode_repeat_key(&key)
                             {
-                                self.handle_terminal_key_headless(key);
+                                // Copy mode exempts arrow keys so holding
+                                // Up/Down/Left/Right moves the cursor continuously.
+                                self.handle_non_terminal_key(key);
                             }
-                            // Repeats in non-terminal modes are ignored
+                            // Other repeats in non-terminal modes are ignored
                             // (same as monolithic behavior).
                         }
                         crossterm::event::KeyEventKind::Release => {
