@@ -189,8 +189,9 @@ fn repeat_key_identity(
 /// Whether a held-key repeat should be delivered to copy mode.
 ///
 /// Copy mode is a non-terminal mode, so key repeats are normally dropped.
-/// The arrow keys are exempted so that holding Up/Down/Left/Right moves the
-/// copy-mode cursor continuously instead of one cell per physical press.
+/// The arrow keys and PageUp/PageDown are exempted so that holding them moves
+/// the copy-mode cursor (or scrolls a page) continuously instead of once per
+/// physical press.
 fn is_copy_mode_repeat_key(key: &crate::input::TerminalKey) -> bool {
     matches!(
         key.code,
@@ -198,6 +199,8 @@ fn is_copy_mode_repeat_key(key: &crate::input::TerminalKey) -> bool {
             | crossterm::event::KeyCode::Down
             | crossterm::event::KeyCode::Left
             | crossterm::event::KeyCode::Right
+            | crossterm::event::KeyCode::PageUp
+            | crossterm::event::KeyCode::PageDown
     )
 }
 
@@ -1404,8 +1407,8 @@ impl App {
                                 }
                             } else if self.state.mode == Mode::Copy && is_copy_mode_repeat_key(&key)
                             {
-                                // Copy mode exempts arrow keys so holding
-                                // Up/Down/Left/Right moves the cursor continuously.
+                                // Copy mode exempts arrow + Page keys so holding
+                                // them moves the cursor / scrolls continuously.
                                 self.handle_non_terminal_key_headless(key);
                             }
                             // Other repeats in non-terminal modes are ignored

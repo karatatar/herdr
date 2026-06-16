@@ -808,10 +808,37 @@ mod tests {
         app.handle_raw_input_event(press).await;
         assert_eq!(app.state.copy_mode.expect("copy mode").cursor_row, 1);
 
-        // Only the arrow keys are exempted; vi-motion repeats stay suppressed.
+        // Only the arrow + Page keys are exempted; vi-motion repeats stay suppressed.
         let repeat_handled = app.handle_raw_input_event(repeat).await;
         assert!(!repeat_handled);
         assert_eq!(app.state.copy_mode.expect("copy mode").cursor_row, 1);
+    }
+
+    #[tokio::test]
+    async fn copy_mode_page_key_repeat_scrolls() {
+        let bytes = numbered_lines_bytes(64);
+        let (mut app, pane_id) = app_with_copy_scrollback(&bytes);
+        app.state.enter_copy_mode(&app.terminal_runtimes);
+
+        let press = crate::raw_input::RawInputEvent::Key(
+            TerminalKey::new(KeyCode::PageUp, KeyModifiers::empty())
+                .with_kind(crossterm::event::KeyEventKind::Press),
+        );
+        let repeat = crate::raw_input::RawInputEvent::Key(
+            TerminalKey::new(KeyCode::PageUp, KeyModifiers::empty())
+                .with_kind(crossterm::event::KeyEventKind::Repeat),
+        );
+
+        app.handle_raw_input_event(press).await;
+        let after_press = copy_mode_offset_from_bottom(&app, pane_id);
+        assert!(after_press > 0);
+
+        // A held PageUp repeat must reach copy mode and scroll a further page,
+        // even though copy mode is a non-terminal mode where repeats are dropped.
+        let repeat_handled = app.handle_raw_input_event(repeat).await;
+        assert!(repeat_handled);
+        assert_eq!(app.state.mode, Mode::Copy);
+        assert!(copy_mode_offset_from_bottom(&app, pane_id) > after_press);
     }
 
     #[tokio::test]

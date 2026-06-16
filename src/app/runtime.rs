@@ -119,8 +119,8 @@ impl App {
                         let deliver = if self.state.mode == Mode::Terminal {
                             !self.suppressed_repeat_keys.contains(&key_id)
                         } else {
-                            // Copy mode exempts arrow keys so holding
-                            // Up/Down/Left/Right moves the cursor continuously.
+                            // Copy mode exempts arrow + Page keys so holding
+                            // them moves the cursor / scrolls continuously.
                             self.state.mode == Mode::Copy && is_copy_mode_repeat_key(&key)
                         };
                         if deliver {
