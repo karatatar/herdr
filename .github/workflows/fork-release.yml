@@ -72,7 +72,7 @@ jobs:
       - name: Install Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.15.2
+          version: 0.16.0
 
       - name: Prefer official Ubuntu mirrors over Azure
         if: runner.os == 'Linux'
