@@ -163,6 +163,30 @@ impl ClientShellState {
             );
             return true;
         }
+        if action == KeybindAction::LastPane {
+            let Some((endpoint_id, pane_id)) = self.previous_pane.clone() else {
+                return true;
+            };
+            if endpoint_id == self.active_endpoint_id {
+                // Same machine: the endpoint method path validates and focuses it.
+                return false;
+            }
+            let pane_exists = self.endpoints.iter().any(|endpoint| {
+                endpoint.endpoint_id == endpoint_id
+                    && endpoint.status == ClientEndpointStatus::Online
+                    && endpoint.snapshot.as_deref().is_some_and(|snapshot| {
+                        snapshot.panes.iter().any(|pane| pane.pane_id == pane_id)
+                    })
+            });
+            if pane_exists {
+                self.focus_or_activate(
+                    endpoint_id,
+                    ClientEndpointFocusTarget::Pane(pane_id),
+                    outcome,
+                );
+            }
+            return true;
+        }
         if matches!(
             action,
             KeybindAction::PreviousMachine | KeybindAction::NextMachine

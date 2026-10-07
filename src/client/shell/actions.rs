@@ -1074,8 +1074,9 @@ impl ClientShellState {
                 }))
             }
             KeybindAction::LastPane => {
-                let pane_id = self.previous_pane_id.as_ref()?;
-                if Some(pane_id.as_str()) == focused_pane.as_deref()
+                let (endpoint_id, pane_id) = self.previous_pane.as_ref()?;
+                if endpoint_id != &self.active_endpoint_id
+                    || Some(pane_id.as_str()) == focused_pane.as_deref()
                     || !snapshot.panes.iter().any(|pane| &pane.pane_id == pane_id)
                 {
                     return None;

@@ -234,6 +234,16 @@ impl ClientShellState {
         let generation = endpoint.snapshot_generation;
         let switching_endpoint = endpoint_id != &self.active_endpoint_id;
         let agent_scroll = self.agent_scroll;
+        // Applying another machine's snapshot resets the projection, so remember the pane
+        // we are leaving for last-pane navigation.
+        let departing_pane = switching_endpoint
+            .then(|| {
+                self.snapshot
+                    .as_deref()
+                    .and_then(|snapshot| snapshot.focused_pane_id.clone())
+                    .map(|pane_id| (self.active_endpoint_id.clone(), pane_id))
+            })
+            .flatten();
         if switching_endpoint {
             self.active_endpoint_id = endpoint_id.clone();
             self.pane_surface = None;
@@ -243,6 +253,9 @@ impl ClientShellState {
         if switching_endpoint {
             // The aggregate agent list belongs to the client, not one endpoint.
             self.agent_scroll = agent_scroll;
+            if departing_pane.is_some() {
+                self.previous_pane = departing_pane;
+            }
         }
         if let Some((_, pane_id)) = pending_agent_reveal {
             self.reveal_endpoint_agent(endpoint_id, &pane_id, agent_body_height);

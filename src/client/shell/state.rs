@@ -903,7 +903,8 @@ pub(crate) struct ClientShellState {
     pub(super) pending_workspace_highlight: Option<PendingWorkspaceHighlight>,
     pub(super) reveal_navigation_workspace: bool,
     pub(super) overlay: Option<ClientShellOverlay>,
-    pub(super) previous_pane_id: Option<String>,
+    /// Last focused pane before the current one, on any machine.
+    pub(super) previous_pane: Option<(ClientEndpointId, String)>,
     pub(super) pane_mouse_gesture: Option<ClientPaneMouseGesture>,
     pub(super) link_hover: Option<super::link_hover::LinkHover>,
     pub(super) url_click_consumes_until_up: bool,
@@ -1068,7 +1069,7 @@ impl ClientShellState {
             pending_workspace_highlight: None,
             reveal_navigation_workspace: false,
             overlay,
-            previous_pane_id: None,
+            previous_pane: None,
             pane_mouse_gesture: None,
             link_hover: None,
             url_click_consumes_until_up: false,
@@ -1261,7 +1262,7 @@ impl ClientShellState {
             .config
             .startup_onboarding
             .then_some(ClientShellOverlay::Onboarding);
-        self.previous_pane_id = None;
+        self.previous_pane = None;
         self.pane_mouse_gesture = None;
         self.link_hover = None;
         self.url_click_consumes_until_up = false;
@@ -1378,7 +1379,7 @@ impl ClientShellState {
             .and_then(|current| current.focused_pane_id.as_ref())
             .filter(|previous| Some(previous.as_str()) != snapshot.focused_pane_id.as_deref())
         {
-            self.previous_pane_id = Some(previous.clone());
+            self.previous_pane = Some((self.active_endpoint_id.clone(), previous.clone()));
         }
         if snapshot_keybindings_changed {
             if let Err(err) = self.config.apply_snapshot_keybindings(

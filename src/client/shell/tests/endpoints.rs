@@ -351,6 +351,48 @@ fn machine_navigation_cycles_online_machines_in_sidebar_order() {
 }
 
 #[test]
+fn last_pane_returns_across_machines_and_back() {
+    use crate::input::KeybindAction;
+
+    let (mut state, remote_id) = state_with_remote();
+    let mut remote = snapshot();
+    remote.boot_id = "remote-boot".into();
+    remote.panes[0].pane_id = "remote_pane".into();
+    remote.focused_pane_id = Some("remote_pane".into());
+    state.set_endpoint_snapshot(&remote_id, Box::new(remote));
+
+    let last_pane = |state: &mut ClientShellState| {
+        let mut outcome = ClientShellInput::default();
+        assert!(state.handle_endpoint_navigation(KeybindAction::LastPane, &mut outcome));
+        match outcome.actions.as_slice() {
+            [ClientShellAction::ActivateEndpoint {
+                endpoint_id,
+                target: Some(ClientEndpointFocusTarget::Pane(pane_id)),
+            }] => (endpoint_id.clone(), pane_id.clone()),
+            actions => panic!("last pane must activate the remembered machine, got {actions:?}"),
+        }
+    };
+
+    // Switching machines remembers the pane we left instead of clearing it.
+    assert!(state.activate_endpoint_projection(&remote_id));
+    assert_eq!(
+        last_pane(&mut state),
+        (ClientEndpointId::Local, "pane_1".to_owned())
+    );
+    assert!(state.activate_endpoint_projection(&ClientEndpointId::Local));
+    assert_eq!(last_pane(&mut state), (remote_id, "remote_pane".to_owned()));
+
+    // A remembered pane that no longer exists is ignored.
+    state.previous_pane = Some((
+        ClientEndpointId::Ssh(remote_profile().id),
+        "closed_pane".into(),
+    ));
+    let mut outcome = ClientShellInput::default();
+    assert!(state.handle_endpoint_navigation(KeybindAction::LastPane, &mut outcome));
+    assert!(outcome.actions.is_empty());
+}
+
+#[test]
 fn agent_navigation_reveals_offscreen_targets() {
     use crate::input::KeybindAction;
 
