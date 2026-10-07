@@ -138,6 +138,11 @@ pub(crate) fn keybind_help_groups(
                 ),
                 entry(binding_label(&keybinds.previous_agent), "previous agent"),
                 entry(binding_label(&keybinds.next_agent), "next agent"),
+                entry(
+                    binding_label(&keybinds.previous_machine),
+                    "previous machine",
+                ),
+                entry(binding_label(&keybinds.next_machine), "next machine"),
                 entry(indexed_label(&keybinds.focus_agent), "focus agent 1-9"),
                 entry(binding_label(&keybinds.new_tab), "new tab"),
                 entry(binding_label(&keybinds.rename_tab), "rename tab"),

@@ -626,6 +626,18 @@
           "description": "Focus the next agent shown in the agent panel. Unset by default."
         },
         {
+          "key": "keys.previous_machine",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Switch to the previous online machine in the sidebar. Unset by default."
+        },
+        {
+          "key": "keys.next_machine",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Switch to the next online machine in the sidebar. Unset by default."
+        },
+        {
           "key": "keys.focus_agent",
           "type": "keybinding",
           "default": "unset",

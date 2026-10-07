@@ -165,6 +165,34 @@ impl ClientShellState {
         }
         if matches!(
             action,
+            KeybindAction::PreviousMachine | KeybindAction::NextMachine
+        ) {
+            // Sidebar order; offline machines are skipped like in workspace navigation.
+            let machines = self
+                .endpoints
+                .iter()
+                .filter(|endpoint| endpoint.status == ClientEndpointStatus::Online)
+                .map(|endpoint| endpoint.endpoint_id.clone())
+                .collect::<Vec<_>>();
+            let current = machines
+                .iter()
+                .position(|endpoint_id| endpoint_id == &self.active_endpoint_id);
+            let next = match (current, action) {
+                (Some(index), KeybindAction::PreviousMachine) => {
+                    (index + machines.len() - 1) % machines.len()
+                }
+                (Some(index), KeybindAction::NextMachine) => (index + 1) % machines.len(),
+                (None, KeybindAction::PreviousMachine) => machines.len() - 1,
+                (None, KeybindAction::NextMachine) => 0,
+                _ => unreachable!("endpoint machine navigation"),
+            };
+            if Some(next) != current {
+                self.activate_endpoint(machines[next].clone(), outcome);
+            }
+            return true;
+        }
+        if matches!(
+            action,
             KeybindAction::PreviousAgent | KeybindAction::NextAgent | KeybindAction::FocusAgent(_)
         ) {
             let agents = super::aggregate_navigation::online_agent_targets(

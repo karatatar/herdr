@@ -296,6 +296,61 @@ fn sidebar_toggle_remains_clickable_with_overflowing_agents() {
 }
 
 #[test]
+fn machine_navigation_cycles_online_machines_in_sidebar_order() {
+    use crate::input::KeybindAction;
+
+    let (mut state, remote_id) = state_with_remote();
+    let mut offline_profile = remote_profile();
+    offline_profile.id = ProfileId::parse("1123456789abcdef0123456789abcdef").unwrap();
+    let offline_id = ClientEndpointId::Ssh(offline_profile.id.clone());
+    state.set_endpoint_catalog(&[remote_profile(), offline_profile]);
+    state.set_endpoint_status(&remote_id, ClientEndpointStatus::Online);
+    state.set_endpoint_status(&offline_id, ClientEndpointStatus::Reconnecting);
+    assert_eq!(
+        state
+            .endpoints
+            .iter()
+            .map(|endpoint| &endpoint.endpoint_id)
+            .collect::<Vec<_>>(),
+        [&ClientEndpointId::Local, &remote_id, &offline_id]
+    );
+
+    let activated = |state: &mut ClientShellState, action| {
+        let mut outcome = ClientShellInput::default();
+        assert!(state.handle_endpoint_navigation(action, &mut outcome));
+        match outcome.actions.as_slice() {
+            [ClientShellAction::ActivateEndpoint {
+                endpoint_id,
+                target: None,
+            }] => endpoint_id.clone(),
+            actions => panic!("{action:?} must activate one machine, got {actions:?}"),
+        }
+    };
+
+    // The offline machine is skipped in both directions and the ends wrap.
+    assert_eq!(activated(&mut state, KeybindAction::NextMachine), remote_id);
+    assert_eq!(
+        activated(&mut state, KeybindAction::PreviousMachine),
+        remote_id
+    );
+    assert!(state.activate_endpoint_projection(&remote_id));
+    assert_eq!(
+        activated(&mut state, KeybindAction::NextMachine),
+        ClientEndpointId::Local
+    );
+    assert_eq!(
+        activated(&mut state, KeybindAction::PreviousMachine),
+        ClientEndpointId::Local
+    );
+
+    // With every other machine offline there is nowhere to go.
+    state.set_endpoint_status(&ClientEndpointId::Local, ClientEndpointStatus::Reconnecting);
+    let mut outcome = ClientShellInput::default();
+    assert!(state.handle_endpoint_navigation(KeybindAction::NextMachine, &mut outcome));
+    assert!(outcome.actions.is_empty());
+}
+
+#[test]
 fn agent_navigation_reveals_offscreen_targets() {
     use crate::input::KeybindAction;
 
