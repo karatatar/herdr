@@ -199,7 +199,30 @@ Use `--format ansi` when colors and terminal styling are evidence. Otherwise use
 
 `--lines` asks Herdr for more rows from the pane's available screen and host scrollback. Alternate-screen rows do not enter ordinary host scrollback. For supported idle agents, Herdr can collect application-owned history and restore the viewport afterward, but not every application or response can be recovered this way.
 
+Line cap: run `herdr --version`. Official builds clamp `pane read`/`agent read` `--lines` to 1000; larger values silently return at most 1000. Fork builds (`-fork` suffix) remove that cap for normal screen reads (bounded only by scrollback), but text `recent` reads of an idle agent's alternate-screen history are still capped at 1000. If you need more than that, use the Markdown-file fallback below instead of retrying with a bigger `--lines`.
+
 If a larger recent read still does not reveal the completed response, ask the agent to write it as Markdown in a temporary directory and reply only with the file path, then read that file on the same machine. Use this only as a fallback; do not request file output in the initial prompt.
+
+### Read a pane by workspace and tab number
+
+When the user names positions such as "workspace 1 tab 14, last lines", they mean the 1-based order in the sidebar and tab bar, not an ID. Resolve the pane in one chained command:
+
+```bash
+W=1 T=14; WS=$(herdr workspace list | jq -er --argjson w "$W" 'first(.result.workspaces[] | select(.number==$w)) | .workspace_id') \
+&& TAB=$(herdr tab list --workspace "$WS" | jq -er --argjson t "$T" '.result.tabs[$t-1].tab_id') \
+&& PANE=$(herdr pane list --workspace "$WS" | jq -er --arg tab "$TAB" 'first(.result.panes[] | select(.tab_id==$tab)) | .pane_id') \
+&& herdr pane read "$PANE" --source recent --lines 200
+```
+
+Change `W`, `T`, and `--lines`. The chain exits with status 1 if the workspace or tab does not exist. A split tab has several panes; this reads the first one, so filter `pane list` yourself when the user means another.
+
+Do not make these mistakes (each one wastes a turn):
+
+- The `w4F:tB` suffix of a tab ID is not its position. Tab `number` is an internal counter (tab 4 can be `tB` with `number` 11). Do not match `tab_id` against the requested number; take the position from the `tab list` order. The label equals the position only until the tab is renamed.
+- Workspace `number` is the sidebar position, so selecting on it is safe.
+- `herdr tab get <tab_id>` does not contain panes; its `result` has only `tab`.
+- `herdr pane list --tab …` does not exist (`unknown option: --tab`). Filter `pane list` output on `tab_id`.
+- `pane read --lines` may be capped at 1000 lines depending on the build; see the line-cap note above.
 
 ## Safety and coordination rules
 
