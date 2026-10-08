@@ -436,7 +436,7 @@ pub struct KeysConfig {
     pub cycle_pane_next: BindingConfig,
     /// Cycle to the previous pane. Default: "prefix+shift+tab".
     pub cycle_pane_previous: BindingConfig,
-    /// Focus the last focused pane across workspaces and tabs. Unset by default.
+    /// Focus the last focused pane across workspaces, tabs, and machines. Unset by default.
     pub last_pane: BindingConfig,
     /// Split pane vertically (side by side). Default: "prefix+v"
     pub split_vertical: BindingConfig,

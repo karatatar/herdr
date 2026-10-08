@@ -791,7 +791,7 @@
           "key": "keys.last_pane",
           "type": "keybinding",
           "default": "unset",
-          "description": "Focus the last focused pane across workspaces and tabs. Unset by default."
+          "description": "Focus the last focused pane across workspaces, tabs, and machines. Unset by default."
         },
         {
           "key": "keys.split_vertical",
