@@ -13,6 +13,10 @@ pub(crate) struct ScreenSnapshot {
 }
 
 impl ScreenSnapshot {
+    pub(crate) fn debug_identities(&self) -> Vec<String> {
+        row_identities(&self.rows)
+    }
+
     pub(crate) fn similar_text(&self, other: &Self) -> bool {
         if self.cols != other.cols || self.rows.len() != other.rows.len() {
             return false;
@@ -77,6 +81,18 @@ pub(crate) fn merge_scrolled_up(
     UpwardMerge::Advanced {
         rows: boundary.saturating_sub(history_anchor),
     }
+}
+
+/// True when `next` shows the same transcript as `previous`, only scrolled
+/// further down (for example after an agent nudges its viewport when a pinned
+/// header changes). Such a frame adds no history but is a valid new reference.
+pub(crate) fn scrolled_down(previous: &ScreenSnapshot, next: &ScreenSnapshot) -> bool {
+    if previous.cols != next.cols || previous.rows.len() != next.rows.len() {
+        return false;
+    }
+    let previous_text = row_identities(&previous.rows);
+    let next_text = row_identities(&next.rows);
+    previous_text != next_text && upward_alignment(&next_text, &previous_text).is_some()
 }
 
 pub(crate) fn snapshot_text(
@@ -540,6 +556,20 @@ mod tests {
                 text: "helloworld\n".into(),
                 truncated: true,
             }
+        );
+    }
+    #[test]
+    fn downward_nudge_is_recognized_but_unrelated_frames_are_not() {
+        let previous = snapshot(&["line 3", "line 4", "line 5", "line 6", "status"]);
+        let nudged = snapshot(&["line 4", "line 5", "line 6", "line 7", "status"]);
+        let unrelated = snapshot(&["other a", "other b", "other c", "other d", "status"]);
+
+        assert!(scrolled_down(&previous, &nudged));
+        assert!(!scrolled_down(&previous, &unrelated));
+        assert!(!scrolled_down(&previous, &previous));
+        assert!(
+            !scrolled_down(&nudged, &previous),
+            "upward scroll is not a nudge"
         );
     }
 }

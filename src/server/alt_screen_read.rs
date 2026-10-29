@@ -11,9 +11,27 @@ use crate::terminal::{ScreenSnapshot, TerminalId, TerminalRuntime, UpwardMerge};
 const INITIAL_QUIET: Duration = Duration::from_millis(10);
 const OUTPUT_QUIET: Duration = Duration::from_millis(10);
 const STEP_TIMEOUT: Duration = Duration::from_millis(120);
-const MAX_DURATION: Duration = Duration::from_secs(15);
+// Fork: long agent transcripts need far more than the upstream 15s/1000 rows.
+// The harvest stops earlier once it reaches the top or the requested rows.
+const MAX_DURATION: Duration = Duration::from_secs(120);
 const MAX_RESTORE_DURATION: Duration = Duration::from_secs(5);
 const WHEEL_STEP_EVENTS: usize = 3;
+/// Extra step timeouts an unaligned frame may take to finish redrawing before
+/// the harvest treats it as an overshoot and starts recovering.
+const UNALIGNED_GRACE_STEPS: u8 = 2;
+/// Agents such as Claude Code accelerate wheel scrolling when events arrive in
+/// quick succession. Once one step moves at least a quarter of the viewport,
+/// pause this long so the acceleration decays before the next batch; otherwise
+/// a step can jump past the whole viewport and leave nothing to align against.
+const ACCELERATION_COOLDOWN: Duration = Duration::from_millis(300);
+/// Single-event downward steps tried to regain overlap after an overshoot.
+const MAX_RECOVER_STEPS: u8 = 12;
+/// How long the screen must stay unchanged, while upward batches keep being
+/// sent, before it counts as the top. Agents may load or lay out older
+/// messages lazily, and a slow redraw must not end the harvest early.
+const TOP_CONFIRM: Duration = Duration::from_millis(1500);
+/// Upper bound on rows one alternate-screen read may return.
+pub(crate) const MAX_HARVEST_LINES: u32 = 100_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -21,6 +39,10 @@ enum Phase {
     ProbeBottom,
     RestoreProbe,
     Harvest,
+    /// Waiting for agent-side wheel acceleration to decay.
+    Cooldown,
+    /// Stepping back down after a scroll jumped past the previous viewport.
+    Recover,
     Restore,
 }
 
@@ -45,6 +67,9 @@ pub(crate) struct PendingAltScreenRead {
     restore_started_at: Option<Instant>,
     observed_content_seq: u64,
     upward_events: usize,
+    unaligned_grace: u8,
+    recover_steps: u8,
+    unchanged_since: Option<Instant>,
     reached_top: bool,
     valid: bool,
 }
@@ -83,6 +108,9 @@ impl PendingAltScreenRead {
             restore_started_at: None,
             observed_content_seq: content_seq,
             upward_events: 0,
+            unaligned_grace: 0,
+            recover_steps: 0,
+            unchanged_since: None,
             reached_top: false,
             valid: true,
         }
@@ -97,7 +125,7 @@ impl PendingAltScreenRead {
         source: crate::api::schema::ReadSource,
         lines: Option<u32>,
     ) -> crate::pane::TerminalReadSnapshot {
-        let line_limit = lines.map(|lines| lines.min(1000) as usize);
+        let line_limit = lines.map(|lines| lines.min(MAX_HARVEST_LINES) as usize);
         match source {
             crate::api::schema::ReadSource::Recent
             | crate::api::schema::ReadSource::RecentUnwrapped => {
@@ -125,7 +153,7 @@ impl PendingAltScreenRead {
         self.valid = false;
         match self.phase {
             Phase::SettleInitial => self.complete_fallback(),
-            Phase::Harvest => match runtime {
+            Phase::Harvest | Phase::Cooldown | Phase::Recover => match runtime {
                 Some(runtime) => self.start_restore(runtime, now, None),
                 None => self.complete_fallback(),
             },
@@ -141,19 +169,35 @@ impl PendingAltScreenRead {
             .restore_started_at
             .is_some_and(|started| now.duration_since(started) >= MAX_RESTORE_DURATION);
         if restore_expired {
-            return self.complete_fallback();
+            // The rows are already harvested; failing to scroll the viewport all
+            // the way back must not throw them away.
+            return if self.valid && self.phase == Phase::Restore {
+                self.complete_success()
+            } else {
+                self.complete_fallback()
+            };
         }
         let traversal_expired = now.duration_since(self.started_at) >= MAX_DURATION
             && matches!(
                 self.phase,
-                Phase::SettleInitial | Phase::ProbeBottom | Phase::Harvest
+                Phase::SettleInitial
+                    | Phase::ProbeBottom
+                    | Phase::Harvest
+                    | Phase::Cooldown
+                    | Phase::Recover
             );
         if traversal_expired {
-            self.valid = false;
             match self.phase {
-                Phase::SettleInitial => return self.complete_fallback(),
-                Phase::Harvest => return self.start_restore(runtime, now, None),
-                Phase::ProbeBottom => {}
+                Phase::SettleInitial => {
+                    self.valid = false;
+                    return self.complete_fallback();
+                }
+                // Out of time mid-harvest: keep the partial history (reported
+                // as truncated because the top was not reached).
+                Phase::Harvest | Phase::Cooldown | Phase::Recover => {
+                    return self.start_restore(runtime, now, None)
+                }
+                Phase::ProbeBottom => self.valid = false,
                 Phase::RestoreProbe | Phase::Restore => unreachable!(),
             }
         }
@@ -282,7 +326,7 @@ impl PendingAltScreenRead {
                     Some(self)
                 }
             }
-            Phase::Harvest => {
+            Phase::Harvest | Phase::Cooldown | Phase::Recover => {
                 let merge = crate::terminal::merge_scrolled_up(
                     &mut self.history,
                     &self.previous,
@@ -290,32 +334,77 @@ impl PendingAltScreenRead {
                 );
                 debug!(
                     terminal_id = %self.terminal_id,
+                    phase = ?self.phase,
                     ?merge,
                     retained_rows = self.history.len(),
                     batch_events = WHEEL_STEP_EVENTS,
                     step_expired,
                     "alternate-screen harvest snapshot"
                 );
-                match merge {
-                    UpwardMerge::Advanced { .. } => {
+                if merge == UpwardMerge::Unaligned && step_expired {
+                    debug!(
+                        terminal_id = %self.terminal_id,
+                        previous = ?self.previous.debug_identities(),
+                        next = ?snapshot.debug_identities(),
+                        "alternate-screen harvest unaligned frames"
+                    );
+                }
+                match (self.phase, merge) {
+                    (_, UpwardMerge::Advanced { rows }) => {
+                        self.unaligned_grace = 0;
+                        self.recover_steps = 0;
+                        self.unchanged_since = None;
                         self.previous = snapshot;
                         if self.history.len() >= self.lines {
                             self.start_restore(runtime, now, Some(snapshot_seq))
+                        } else if rows >= cooldown_rows(&self.previous) {
+                            self.start_cooldown(now, snapshot_seq)
                         } else {
                             self.start_harvest(runtime, now, snapshot_seq)
                         }
                     }
-                    UpwardMerge::Unchanged if step_expired => {
-                        self.reached_top = true;
-                        self.start_restore(runtime, now, Some(snapshot_seq))
-                    }
-                    UpwardMerge::Unaligned if step_expired => {
-                        self.valid = false;
-                        self.start_restore(runtime, now, Some(snapshot_seq))
-                    }
-                    UpwardMerge::Unchanged | UpwardMerge::Unaligned => {
+                    (_, UpwardMerge::Unchanged | UpwardMerge::Unaligned) if !step_expired => {
                         self.step_observed_output = false;
                         Some(self)
+                    }
+                    (Phase::Cooldown | Phase::Recover, UpwardMerge::Unchanged) => {
+                        self.start_harvest(runtime, now, snapshot_seq)
+                    }
+                    (_, UpwardMerge::Unchanged) => {
+                        let since = *self.unchanged_since.get_or_insert(now);
+                        if now.duration_since(since) < TOP_CONFIRM {
+                            self.start_harvest(runtime, now, snapshot_seq)
+                        } else {
+                            self.reached_top = true;
+                            self.start_restore(runtime, now, Some(snapshot_seq))
+                        }
+                    }
+                    (_, UpwardMerge::Unaligned)
+                        if crate::terminal::scrolled_down(&self.previous, &snapshot) =>
+                    {
+                        // The agent moved its viewport down a little. Nothing new
+                        // to keep, but continue from this frame.
+                        self.unaligned_grace = 0;
+                        self.previous = snapshot;
+                        self.start_harvest(runtime, now, snapshot_seq)
+                    }
+                    (Phase::Harvest, UpwardMerge::Unaligned)
+                        if self.unaligned_grace < UNALIGNED_GRACE_STEPS =>
+                    {
+                        // A slow redraw can still be in flight; give it more time.
+                        self.unaligned_grace += 1;
+                        self.step_observed_output = false;
+                        self.next_poll_at = now + STEP_TIMEOUT;
+                        self.step_deadline = self.next_poll_at;
+                        Some(self)
+                    }
+                    (_, UpwardMerge::Unaligned) if self.recover_steps < MAX_RECOVER_STEPS => {
+                        self.start_recover(runtime, now, snapshot_seq)
+                    }
+                    (_, UpwardMerge::Unaligned) => {
+                        // Give up but keep everything merged so far; the response
+                        // is marked truncated because the top was not reached.
+                        self.start_restore(runtime, now, Some(snapshot_seq))
                     }
                 }
             }
@@ -360,6 +449,30 @@ impl PendingAltScreenRead {
         }
         self.upward_events = self.upward_events.saturating_add(events);
         self.phase = Phase::Harvest;
+        self.arm_step(baseline_seq, now);
+        Some(self)
+    }
+
+    fn start_cooldown(mut self, now: Instant, baseline_seq: u64) -> PollOutcome {
+        self.phase = Phase::Cooldown;
+        self.arm_step(baseline_seq, now);
+        self.next_poll_at = now + ACCELERATION_COOLDOWN;
+        self.step_deadline = self.next_poll_at;
+        Some(self)
+    }
+
+    fn start_recover(
+        mut self,
+        runtime: &TerminalRuntime,
+        now: Instant,
+        baseline_seq: u64,
+    ) -> PollOutcome {
+        if send_wheel(runtime, MouseEventKind::ScrollDown, 1, &self.previous).is_err() {
+            return self.start_restore(runtime, now, Some(baseline_seq));
+        }
+        self.recover_steps += 1;
+        self.unaligned_grace = 0;
+        self.phase = Phase::Recover;
         self.arm_step(baseline_seq, now);
         Some(self)
     }
@@ -437,6 +550,10 @@ impl PendingAltScreenRead {
 
 pub(crate) type PollOutcome = Option<PendingAltScreenRead>;
 
+fn cooldown_rows(snapshot: &ScreenSnapshot) -> usize {
+    snapshot.rows.len().saturating_div(4).max(4)
+}
+
 fn restore_batch_size(snapshot: &ScreenSnapshot) -> usize {
     snapshot.rows.len().saturating_div(2).max(1)
 }
@@ -510,6 +627,58 @@ mod tests {
             now,
         );
         (pending, response_rx)
+    }
+
+    fn response_read(response_rx: &mpsc::Receiver<String>) -> PaneReadResult {
+        let response: SuccessResponse = serde_json::from_str(
+            &response_rx
+                .recv_timeout(Duration::from_millis(50))
+                .expect("read response"),
+        )
+        .expect("valid response");
+        let ResponseResult::PaneRead { read } = response.result else {
+            panic!("expected pane read response");
+        };
+        read
+    }
+
+    /// Draws `lines`, lets the redraw settle, and returns the pending read after
+    /// it reacted to the frame.
+    fn show(
+        pending: PendingAltScreenRead,
+        runtime: &TerminalRuntime,
+        input_rx: &mut tokio::sync::mpsc::Receiver<Bytes>,
+        now: &mut Instant,
+        lines: &[&str],
+    ) -> PollOutcome {
+        runtime.test_process_pty_bytes(&draw(lines, false));
+        *now += Duration::from_millis(1);
+        let pending = pending.poll(Some(runtime), *now)?;
+        *now += OUTPUT_QUIET + Duration::from_millis(1);
+        let pending = pending.poll(Some(runtime), *now);
+        while input_rx.try_recv().is_ok() {}
+        pending
+    }
+
+    /// Keeps polling without new output until the read reaches `phase`.
+    fn idle_until(
+        mut pending: PendingAltScreenRead,
+        runtime: &TerminalRuntime,
+        input_rx: &mut tokio::sync::mpsc::Receiver<Bytes>,
+        now: &mut Instant,
+        phase: Phase,
+    ) -> PendingAltScreenRead {
+        for _ in 0..200 {
+            if pending.phase == phase {
+                return pending;
+            }
+            *now += STEP_TIMEOUT;
+            pending = pending
+                .poll(Some(runtime), *now)
+                .expect("read should still be pending");
+            while input_rx.try_recv().is_ok() {}
+        }
+        panic!("read never reached {phase:?}");
     }
 
     fn response_text(response_rx: &mpsc::Receiver<String>) -> String {
@@ -988,6 +1157,121 @@ mod tests {
             response_text(&response_rx),
             "13\n14\n15\n16\n17\n18\n19\n20\n"
         );
+
+        drop(runtime);
+        drop(_guard);
+        rt.shutdown_timeout(Duration::from_millis(100));
+    }
+    #[test]
+    fn unalignable_frame_keeps_the_partial_history() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let _guard = rt.enter();
+        let initial = ["16", "17", "18", "19", "20"];
+        let (runtime, mut input_rx) = TerminalRuntime::test_with_channel_capacity(20, 5, 8);
+        runtime.test_process_pty_bytes(&draw(&initial, true));
+        let mut now = Instant::now();
+        let (pending, response_rx) = pending_read(&runtime, now, 100);
+
+        now += INITIAL_QUIET;
+        let pending = pending.poll(Some(&runtime), now).expect("bottom probe");
+        now += STEP_TIMEOUT;
+        let pending = pending.poll(Some(&runtime), now).expect("history harvest");
+        while input_rx.try_recv().is_ok() {}
+
+        let pending = show(
+            pending,
+            &runtime,
+            &mut input_rx,
+            &mut now,
+            &["13", "14", "15", "16", "17"],
+        )
+        .expect("aligned step keeps harvesting");
+        // The next frame shares nothing with the previous one, as when an
+        // accelerated scroll jumps past the whole viewport.
+        let pending = show(
+            pending,
+            &runtime,
+            &mut input_rx,
+            &mut now,
+            &["a", "b", "c", "d", "e"],
+        )
+        .expect("unaligned frame waits");
+        let pending = idle_until(pending, &runtime, &mut input_rx, &mut now, Phase::Restore);
+        assert!(!pending.reached_top);
+
+        assert!(show(pending, &runtime, &mut input_rx, &mut now, &initial).is_none());
+        let read = response_read(&response_rx);
+        assert_eq!(read.text, "13\n14\n15\n16\n17\n18\n19\n20\n");
+        assert!(
+            read.truncated,
+            "a partial harvest must be reported as truncated"
+        );
+
+        drop(runtime);
+        drop(_guard);
+        rt.shutdown_timeout(Duration::from_millis(100));
+    }
+
+    #[test]
+    fn downward_nudge_continues_from_the_new_frame_and_top_needs_confirmation() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let _guard = rt.enter();
+        let initial = ["16", "17", "18", "19", "20"];
+        let (runtime, mut input_rx) = TerminalRuntime::test_with_channel_capacity(20, 5, 8);
+        runtime.test_process_pty_bytes(&draw(&initial, true));
+        let mut now = Instant::now();
+        let (pending, response_rx) = pending_read(&runtime, now, 100);
+
+        now += INITIAL_QUIET;
+        let pending = pending.poll(Some(&runtime), now).expect("bottom probe");
+        now += STEP_TIMEOUT;
+        let pending = pending.poll(Some(&runtime), now).expect("history harvest");
+        while input_rx.try_recv().is_ok() {}
+
+        let pending = show(
+            pending,
+            &runtime,
+            &mut input_rx,
+            &mut now,
+            &["13", "14", "15", "16", "17"],
+        )
+        .expect("aligned step");
+        let pending = show(
+            pending,
+            &runtime,
+            &mut input_rx,
+            &mut now,
+            &["14", "15", "16", "17", "18"],
+        )
+        .expect("downward nudge waits for its step");
+        now += STEP_TIMEOUT;
+        let pending = pending.poll(Some(&runtime), now).expect("nudge accepted");
+        assert_eq!(pending.phase, Phase::Harvest);
+        let pending = show(
+            pending,
+            &runtime,
+            &mut input_rx,
+            &mut now,
+            &["11", "12", "13", "14", "15"],
+        )
+        .expect("aligned step after the nudge");
+
+        // An unchanged screen only counts as the top after TOP_CONFIRM.
+        let confirm_started = now;
+        let pending = idle_until(pending, &runtime, &mut input_rx, &mut now, Phase::Restore);
+        assert!(now.duration_since(confirm_started) >= TOP_CONFIRM);
+        assert!(pending.reached_top);
+
+        assert!(show(pending, &runtime, &mut input_rx, &mut now, &initial).is_none());
+        let read = response_read(&response_rx);
+        assert_eq!(read.text, "11\n12\n13\n14\n15\n16\n17\n18\n19\n20\n");
+        assert!(!read.truncated);
 
         drop(runtime);
         drop(_guard);
